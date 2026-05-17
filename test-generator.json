@@ -1,8 +1,0 @@
-{
-  "app_id": "aabc1234",
-  "invocations": [
-    { "minute": 0, "count": 3, "avg_duration_ms": 800 },
-    { "minute": 1, "count": 12, "avg_duration_ms": 650 },
-    { "minute": 2, "count": 0, "avg_duration_ms": 0 }
-  ]
-}

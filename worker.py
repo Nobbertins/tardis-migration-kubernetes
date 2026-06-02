@@ -1,11 +1,14 @@
 import asyncio
 import math
+import multiprocessing
+import os
 import time
-from multiprocessing import Process
-
+import subprocess
 from aiohttp import web
+import psutil
 
-PORT = 8080
+PORT         = 8080
+POOL_SIZE    = int(os.environ.get("POOL_SIZE", str(os.cpu_count() or 4)))
 
 
 def burn_cpu(duration_s, intensity):
@@ -14,39 +17,40 @@ def burn_cpu(duration_s, intensity):
     Uses a duty cycle: within each 100ms slice, burn for intensity * 100ms
     then sleep for the remainder.
     """
-    if intensity <= 0:
-        time.sleep(duration_s)
-        return
-    slice_s  = 0.1
-    busy_s   = slice_s * intensity
-    sleep_s  = slice_s * (1 - intensity)
-    end      = time.time() + duration_s
-    while time.time() < end:
-        busy_end = time.time() + busy_s
-        while time.time() < busy_end:
-            math.sqrt(99999999 ** 2)
-        if sleep_s > 0 and time.time() < end:
-            time.sleep(sleep_s)
+    start_time = time.time()
+    subprocess.run([
+        "timeout", f"{duration_s}", "stress-ng",
+        "--cpu", "0", "--cpu-load", "2"
+    ])
+    return start_time
+# global pool — initialized once at startup
+pool = None
 
 
 async def handle_invocation(request):
     """
     Expects JSON: { "duration_ms": float, "intensity": float }
-    Spawns a burn process, waits for it to finish, then responds.
-    Latency is measured from when the request arrives to when the
-    burn completes — the orchestrator measures end-to-end.
+    Submits burn to the process pool and waits non-blocking for it to finish.
     """
-    data        = await request.json()
-    duration_s  = data["duration_ms"] / 1000
-    intensity   = data.get("intensity", 1.0)
+    arrival_time = time.time()
 
-    p = Process(target=burn_cpu, args=(duration_s, intensity))
-    p.start()
+    data       = await request.json()
+
+    parse_time = time.time()
+
+    duration_s = data["duration_ms"] / 1000
+    intensity  = data.get("intensity", 1.0)
+
+    pool_start = time.time()
 
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, p.join)
+    # run_in_executor submits to the pool without blocking the event loop
+    burn_start = await loop.run_in_executor(None, lambda: pool.apply(burn_cpu, (duration_s, intensity)))
 
-    return web.Response(text="done")
+    burn_finish = time.time()
+
+    output = f"{arrival_time},{burn_finish},parse={( parse_time - arrival_time)*1000:.1f}ms pool_wait={(burn_start - pool_start)*1000:.1f}ms burn_latency={(burn_finish - burn_start - duration_s)*1000:.1f}ms node_cpu_load={psutil.cpu_percent()}%"
+    return web.Response(text=output)
 
 
 async def handle_health(request):
@@ -54,10 +58,18 @@ async def handle_health(request):
 
 
 def main():
+    psutil.cpu_percent()
+    global pool
+    print(f"Starting worker with pool size {POOL_SIZE}")
+    pool = multiprocessing.Pool(processes=POOL_SIZE)
+
     app = web.Application()
     app.router.add_post("/invoke", handle_invocation)
     app.router.add_get("/health", handle_health)
     web.run_app(app, port=PORT)
+
+    pool.close()
+    pool.join()
 
 
 if __name__ == "__main__":

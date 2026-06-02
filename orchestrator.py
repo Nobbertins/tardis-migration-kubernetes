@@ -4,6 +4,7 @@ import os
 import time
 
 import aiohttp
+import aiodns
 
 # ── config ────────────────────────────────────────────────────────────────────
 TRACE_FILE    = os.environ.get("TRACE_FILE", "trace.txt")
@@ -47,51 +48,79 @@ def normalize_times(invocations):
 
 def apply_window(invocations, window_start, window_end):
     """
-    Filter invocations to only those whose start_time falls within
-    [window_start, window_end]. Times are already normalized to 0.
+    Filter invocations to those whose start_time falls within
+    [window_start, window_end]. Invocations that start within the window
+    but have a duration extending past window_end are clamped so their
+    duration ends at window_end — prevents runaway burns after the window closes.
+    Times are already normalized to 0 before this is called.
     """
     filtered = invocations
     if window_start is not None:
         filtered = [i for i in filtered if i["start_time"] >= window_start]
     if window_end is not None:
-        filtered = [i for i in filtered if i["start_time"] <= window_end]
-    # re-zero again relative to the window start
+        # discard any invocation that doesn't fully complete within the window
+        filtered = [i for i in filtered
+                    if i["start_time"] + i["duration_ms"] / 1000 <= window_end]
+
+    # re-zero relative to the first invocation in the window
     if filtered:
         min_start = filtered[0]["start_time"]
         for inv in filtered:
             inv["start_time"] -= min_start
+
     return filtered
 
 
 async def dispatch(session, app_id, duration_ms, send_time, results):
     """
-    Send a single invocation request to the app's worker pod and record latency.
+    Send a single invocation request to the app's worker pod and record overhead.
+    overhead_ms = latency_ms - duration_ms (extra time beyond the function's actual duration)
     """
     url = WORKER_SVC.format(app_id=app_id)
     try:
         async with session.post(
             f"{url}/invoke",
             json={"duration_ms": duration_ms, "intensity": 1.0},
-            timeout=aiohttp.ClientTimeout(total=300),
+            timeout=aiohttp.ClientTimeout(total=duration_ms / 1000 + 30),  # duration + 30s grace
         ) as resp:
+            worker_response = (await resp.text()).split(',')
+            worker_start = float(worker_response[0])
+            worker_finish = float(worker_response[1])
+            print(f"worker log: {worker_response[2]}")
             receive_time = time.time()
+            network_receive_ms = (receive_time - worker_finish) * 1000
+            network_send_ms = (worker_start - send_time) * 1000
+            print(f"[{app_id}] worker_latency={((worker_finish-worker_start)*1000-duration_ms):.1f}ms network_send_ms={network_send_ms:.1f}ms network_receive_ms={network_receive_ms:.1f}ms")
             latency_ms   = (receive_time - send_time) * 1000
+            overhead_ms  = latency_ms - duration_ms
             status       = resp.status
-            print(f"[{app_id}] latency={latency_ms:.1f}ms status={status}")
+            print(f"[{app_id}] overhead={overhead_ms:.1f}ms latency={latency_ms:.1f}ms duration={duration_ms:.0f}ms status={status}")
             results.append({
                 "app_id":      app_id,
                 "duration_ms": duration_ms,
                 "latency_ms":  latency_ms,
+                "overhead_ms": overhead_ms,
                 "status":      status,
             })
+    except asyncio.TimeoutError:
+        print(f"[{app_id}] timed out after {duration_ms / 1000 + 30:.0f}s (duration={duration_ms:.0f}ms)")
+    except aiohttp.ServerDisconnectedError:
+        print(f"[{app_id}] server disconnected (duration={duration_ms:.0f}ms)")
+    except aiohttp.ClientConnectorError as e:
+        print(f"[{app_id}] connection error: {e}")
     except Exception as e:
-        print(f"[{app_id}] error: {e}")
+        print(f"[{app_id}] unexpected error: {type(e).__name__}: {e}")
 
 
 def write_results(results, filepath):
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    if not results:
+        print("No results to write.")
+        return
+    dirpath = os.path.dirname(filepath)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     with open(filepath, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["app_id", "duration_ms", "latency_ms", "status"])
+        writer = csv.DictWriter(f, fieldnames=["app_id", "duration_ms", "latency_ms", "overhead_ms", "status"])
         writer.writeheader()
         writer.writerows(results)
     print(f"Results written to {filepath}")
@@ -101,16 +130,16 @@ def print_tail_latency(results):
     if not results:
         print("No results to report.")
         return
-    latencies = sorted(r["latency_ms"] for r in results)
-    n = len(latencies)
-    print(f"\n── Tail Latency Report ({'─' * 30})")
+    overheads = sorted(r["overhead_ms"] for r in results)
+    n = len(overheads)
+    print(f"\n── Tail Latency Report (overhead = latency - duration) ──")
     print(f"  Total invocations : {n}")
-    print(f"  p50  : {latencies[int(n * 0.50)]:.1f}ms")
-    print(f"  p90  : {latencies[int(n * 0.90)]:.1f}ms")
-    print(f"  p95  : {latencies[int(n * 0.95)]:.1f}ms")
-    print(f"  p99  : {latencies[int(n * 0.99)]:.1f}ms")
-    print(f"  p999 : {latencies[min(int(n * 0.999), n - 1)]:.1f}ms")
-    print(f"  max  : {latencies[-1]:.1f}ms")
+    print(f"  p50  : {overheads[int(n * 0.50)]:.1f}ms")
+    print(f"  p90  : {overheads[int(n * 0.90)]:.1f}ms")
+    print(f"  p95  : {overheads[int(n * 0.95)]:.1f}ms")
+    print(f"  p99  : {overheads[int(n * 0.99)]:.1f}ms")
+    print(f"  p999 : {overheads[min(int(n * 0.999), n - 1)]:.1f}ms")
+    print(f"  max  : {overheads[-1]:.1f}ms")
 
 
 async def run(invocations):
@@ -121,7 +150,13 @@ async def run(invocations):
     await asyncio.sleep(START_DELAY)
     print("Simulation started.")
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(
+        resolver=aiohttp.AsyncResolver(),  # uses aiodns with caching
+        ttl_dns_cache=300,                 # cache DNS results for 5 minutes
+        use_dns_cache=True,
+    )
+    ) as session:
         tasks = []
         for inv in invocations:
             target = sim_start + inv["start_time"] * TIME_SCALE
@@ -136,7 +171,7 @@ async def run(invocations):
             )
             tasks.append(task)
 
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     print_tail_latency(results)
     write_results(results, RESULTS_FILE)

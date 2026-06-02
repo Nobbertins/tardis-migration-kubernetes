@@ -1,0 +1,123 @@
+---
+# ── Shared results PVC (one per node via local-path or hostPath) ─────────────
+# If you want per-node files, use the hostPath volume in the DaemonSet instead.
+
+---
+# ── DaemonSet ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-metrics-collector
+  namespace: metrics
+  labels:
+    app: node-metrics-collector
+spec:
+  selector:
+    matchLabels:
+      app: node-metrics-collector
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: node-metrics-collector
+    spec:
+      # ── tolerations so the pod lands on control-plane nodes too ───────────
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+
+      # Give the pod access to the host's process namespace so psutil sees
+      # node-level CPU/memory (not just the container cgroup).
+      hostPID: true
+      hostNetwork: false   # keep network isolated
+
+      containers:
+        - name: collector
+          image: nobbertins/node-metrics-collector:latest   # ← replace
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 9100
+              protocol: TCP
+          env:
+            # ── Downward API: inject the real node name ──────────────────
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # ── tunable config ───────────────────────────────────────────
+            - name: SCRAPE_INTERVAL
+              value: "1.0"       # seconds between samples
+            - name: MAX_SAMPLES
+              value: "86400"     # 1 day at 1 s/sample
+            - name: RESULTS_FILE
+              value: /results/metrics.csv
+            - name: PORT
+              value: "9100"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: results
+              mountPath: /results
+            # Mount host /proc so psutil reads real node stats
+            - name: host-proc
+              mountPath: /proc
+              readOnly: true
+            - name: host-sys
+              mountPath: /sys
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 3
+            periodSeconds: 5
+
+      volumes:
+        # Write results to the node's local disk at /tmp/metrics/<node>
+        - name: results
+          hostPath:
+            path: /tmp/node-metrics
+            type: DirectoryOrCreate
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: host-sys
+          hostPath:
+            path: /sys
+
+---
+# ── Service (ClusterIP) so other pods can scrape each collector ──────────────
+# Each pod is reachable via its pod IP; this Service lets you hit any of them.
+# For per-node targeting from the orchestrator, use the pod IP or a headless
+# Service — see the README notes below.
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-metrics-collector
+  namespace: metrics
+  labels:
+    app: node-metrics-collector
+spec:
+  selector:
+    app: node-metrics-collector
+  clusterIP: None    # headless — DNS returns all pod IPs
+  ports:
+    - name: http
+      port: 9100
+      targetPort: 9100
+      protocol: TCP

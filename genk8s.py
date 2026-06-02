@@ -6,8 +6,8 @@ from collections import defaultdict
 # ── config ────────────────────────────────────────────────────────────────────
 TRACE_FILE      = "AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt"
 OUTPUT_DIR      = "k8s"
-WORKER_IMAGE    = "aftworker"
-ORCH_IMAGE      = "aftorchestrator"
+WORKER_IMAGE    = "worker"
+ORCH_IMAGE      = "orchestrator"
 NAMESPACE       = "default"
 # ─────────────────────────────────────────────────────────────────────────────
 

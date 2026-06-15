@@ -1,0 +1,45 @@
+UTAH c6525-25g
+
+NoMigration:
+
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 89
+  p50  : 103.4ms
+  p60  : 126.3ms
+  p70  : 138.2ms
+  p80  : 146.7ms
+  p90  : 194.3ms
+  p95  : 239.3ms
+  p99  : 373.3ms
+  p999 : 373.3ms
+  max  : 373.3ms
+
+LoadAvg:
+
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 86
+  p50  : 100.1ms
+  p60  : 120.3ms
+  p70  : 131.8ms
+  p80  : 143.5ms
+  p90  : 161.8ms
+  p95  : 202.2ms
+  p99  : 324.0ms
+  p999 : 324.0ms
+  max  : 324.0ms
+
+LoadPeak:
+
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 88
+  p50  : 101.9ms
+  p60  : 127.7ms
+  p70  : 134.9ms
+  p80  : 145.6ms
+  p90  : 161.2ms
+  p95  : 251.7ms
+  p99  : 355.8ms
+  p999 : 355.8ms
+  max  : 355.8ms
+
+  Noticeable improvement in p90. Max is also better, but this might be misleading because a few invocations were dropped while migrating.

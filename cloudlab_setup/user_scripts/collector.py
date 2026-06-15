@@ -13,7 +13,12 @@ RESULTS_FILE    = os.environ.get("RESULTS_FILE", "/results/metrics.csv")
 NODE_NAME       = os.environ.get("NODE_NAME", "unknown")
 MAX_SAMPLES     = int(os.environ.get("MAX_SAMPLES", "86400"))
 NODE_IP         = os.environ.get("NODE_IP", "127.0.0.1")
-CADVISOR_URL    = f"http://{NODE_IP}:10255/metrics/cadvisor"
+CADVISOR_URL    = f"https://{NODE_IP}:10250/metrics/cadvisor"
+
+TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+with open(TOKEN_FILE) as f:
+    KUBE_TOKEN = f.read().strip()
 
 samples: list[dict] = []
 collector_task  = None
@@ -22,35 +27,70 @@ http_session: ClientSession | None = None
 # ── cAdvisor scraping ─────────────────────────────────────────────────────────
 
 def parse_cadvisor(text: str) -> dict[str, float]:
-    """
-    Parse container_cpu_usage_seconds_total from cAdvisor prometheus text.
-    Returns {pod_name: cumulative_cpu_seconds}, skipping pause containers.
-    """
     pod_cpu: dict[str, float] = {}
-    pattern = re.compile(
-        r'^container_cpu_usage_seconds_total\{([^}]+)\}\s+([\d.e+]+)', re.MULTILINE
-    )
-    for m in pattern.finditer(text):
-        labels: dict[str, str] = {}
-        for part in m.group(1).split(","):
+
+    for line in text.splitlines():
+        if "container_cpu_usage_seconds_total" not in line:
+            continue
+        if line.startswith("#"):
+            continue
+
+        try:
+            parts = line.split()
+            # format: <metric>{<labels>} <value> [<timestamp_ms>]
+            # always take index 1 (value), not -1 (which would be the timestamp)
+            metric = parts[0]
+            value = float(parts[1])
+        except (ValueError, IndexError):
+            continue
+
+        if "{" not in metric:
+            continue
+
+        label_str = metric[metric.find("{") + 1 : metric.rfind("}")]
+        labels = {}
+        for part in label_str.split(","):
+            if "=" not in part:
+                continue
             k, _, v = part.partition("=")
             labels[k.strip()] = v.strip().strip('"')
 
-        pod  = labels.get("pod", "")
-        name = labels.get("name", "")
-        if not pod or not name or "pause" in name:
+        pod = labels.get("pod") or labels.get("pod_name") or ""
+        namespace = labels.get("namespace") or ""
+
+        # skip cgroup rollup lines (no pod) and lines without a namespace
+        if not pod or not namespace:
             continue
 
-        pod_cpu[pod] = pod_cpu.get(pod, 0.0) + float(m.group(2))
+        # only count the pod-level rollup line (container=""), not per-container lines
+        # to avoid double-counting
+        container = labels.get("container") or labels.get("container_name") or ""
+        if container != "":
+            continue
+
+        pod_cpu[pod] = pod_cpu.get(pod, 0.0) + value
+
+    print(f"[parse] found {len(pod_cpu)} pods: {list(pod_cpu.keys())[:5]}")
     return pod_cpu
 
 
 async def scrape_cadvisor() -> dict[str, float]:
     try:
-        async with http_session.get(CADVISOR_URL, timeout=ClientTimeout(total=3)) as resp:
-            return parse_cadvisor(await resp.text())
+        async with http_session.get(
+            CADVISOR_URL,
+            headers={"Authorization": f"Bearer {KUBE_TOKEN}"},
+            ssl=False,
+            timeout=ClientTimeout(total=3)
+        ) as resp:
+            if resp.status != 200:
+                print(f"[cadvisor] HTTP {resp.status}")
+                return {}
+
+            text = await resp.text(errors="ignore")
+            return parse_cadvisor(text)
+
     except Exception as e:
-        print(f"cAdvisor scrape failed: {e}")
+        print(f"[cadvisor] scrape failed: {e}")
         return {}
 
 
@@ -66,16 +106,19 @@ async def collect_loop():
     while True:
         ts        = time.time()
         cpu_total = psutil.cpu_percent()
+        elapsed   = ts - prev_ts
 
         raw_pod_cpu = await scrape_cadvisor()
-        elapsed     = ts - prev_ts
         pod_cpu_pct: dict[str, float] = {}
 
         if elapsed > 0 and prev_pod_cpu:
             for pod, cum in raw_pod_cpu.items():
                 if pod in prev_pod_cpu:
                     delta = cum - prev_pod_cpu[pod]
-                    pod_cpu_pct[pod] = round(100.0 * delta / elapsed, 2)
+                    if 0 < delta < 3600:
+                        pod_cpu_pct[pod] = round(100.0 * delta / elapsed, 2)
+                    else:
+                        print(f"[delta] {pod} delta={delta:.6f} cum={cum:.6f} prev={prev_pod_cpu[pod]:.6f}")
 
         prev_pod_cpu = raw_pod_cpu
         prev_ts      = ts

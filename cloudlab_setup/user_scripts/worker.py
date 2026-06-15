@@ -21,7 +21,7 @@ def burn_cpu(duration_s, intensity):
     start_time = time.time()
     subprocess.run([
         "timeout", f"{duration_s}", "stress-ng",
-        "--cpu", "0", "--cpu-load", "10"
+        "--cpu", "0", "--cpu-load", "30"
     ])
     return start_time
 # global pool — initialized once at startup
@@ -41,7 +41,7 @@ async def handle_invocation(request):
 
     duration_s = data["duration_ms"] / 1000
     intensity  = data.get("intensity", 1.0)
-
+    
     pool_start = time.time()
 
     loop = asyncio.get_event_loop()

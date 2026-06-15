@@ -63,6 +63,9 @@ def apply_window(invocations, window_start, window_end):
         filtered = [i for i in filtered
                     if i["start_time"] + i["duration_ms"] / 1000 <= window_end]
 
+    # remove zero-duration invocations (worker hangs on these)
+    filtered = [i for i in filtered if i["duration_ms"] > 0.01]
+    
     # re-zero relative to the first invocation in the window
     if filtered:
         min_start = filtered[0]["start_time"]

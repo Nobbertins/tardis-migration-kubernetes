@@ -1,45 +1,103 @@
-UTAH c6525-25g
+utah 6525-25g (worker 30%)
 
-NoMigration:
-
+NoMig:
 ── Tail Latency Report (overhead = latency - duration) ──
   Total invocations : 89
-  p50  : 103.4ms
-  p60  : 126.3ms
-  p70  : 138.2ms
-  p80  : 146.7ms
-  p90  : 194.3ms
-  p95  : 239.3ms
-  p99  : 373.3ms
-  p999 : 373.3ms
-  max  : 373.3ms
+  Retried           : 0
+  p50  : 122.2ms
+  p60  : 135.7ms
+  p70  : 142.0ms
+  p80  : 153.0ms
+  p90  : 191.9ms
+  p95  : 310.7ms
+  p99  : 514.6ms
+  p999 : 514.6ms
+  max  : 514.6ms
 
-LoadAvg:
-
+PeakLoad:
 ── Tail Latency Report (overhead = latency - duration) ──
-  Total invocations : 86
-  p50  : 100.1ms
-  p60  : 120.3ms
-  p70  : 131.8ms
-  p80  : 143.5ms
-  p90  : 161.8ms
-  p95  : 202.2ms
-  p99  : 324.0ms
-  p999 : 324.0ms
-  max  : 324.0ms
+  Total invocations : 89
+  Retried           : 0
+  p50  : 112.3ms
+  p60  : 132.9ms
+  p70  : 140.7ms
+  p80  : 153.2ms
+  p90  : 182.7ms
+  p95  : 300.8ms
+  p99  : 457.9ms
+  p999 : 457.9ms
+  max  : 457.9ms
 
-LoadPeak:
-
+AvgLoad:
 ── Tail Latency Report (overhead = latency - duration) ──
-  Total invocations : 88
-  p50  : 101.9ms
-  p60  : 127.7ms
-  p70  : 134.9ms
-  p80  : 145.6ms
-  p90  : 161.2ms
-  p95  : 251.7ms
-  p99  : 355.8ms
-  p999 : 355.8ms
-  max  : 355.8ms
+  Total invocations : 89
+  Retried           : 0
+  p50  : 112.1ms
+  p60  : 131.4ms
+  p70  : 141.7ms
+  p80  : 147.8ms
+  p90  : 156.3ms
+  p95  : 172.7ms
+  p99  : 308.0ms
+  p999 : 308.0ms
+  max  : 308.0ms
 
-  Noticeable improvement in p90. Max is also better, but this might be misleading because a few invocations were dropped while migrating.
+---------------------------------------------------------------------------------------------------------------
+
+clemson c8220 3 nodes (worker 30%)
+NoMig:
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 89
+  Retried           : 0
+  p50  : 137.0ms
+  p60  : 198.3ms
+  p70  : 232.4ms
+  p80  : 256.6ms
+  p90  : 313.0ms
+  p95  : 485.7ms
+  p99  : 745.7ms
+  p999 : 745.7ms
+  max  : 745.7ms
+
+PeakLoad:
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 89
+  Retried           : 0
+  p50  : 154.0ms
+  p60  : 215.5ms
+  p70  : 238.3ms
+  p80  : 255.9ms
+  p90  : 282.6ms
+  p95  : 314.6ms
+  p99  : 503.4ms
+  p999 : 503.4ms
+  max  : 503.4ms
+
+AvgLoad:
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 89
+  Retried           : 0
+  p50  : 125.8ms
+  p60  : 186.4ms
+  p70  : 221.7ms
+  p80  : 248.7ms
+  p90  : 271.1ms
+  p95  : 325.1ms
+  p99  : 677.7ms
+  p999 : 677.7ms
+  max  : 677.7ms
+
+
+TARDIS:
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 89
+  Retried           : 0
+  p50  : 138.2ms
+  p60  : 190.8ms
+  p70  : 223.7ms
+  p80  : 247.4ms
+  p90  : 262.8ms
+  p95  : 303.5ms
+  p99  : 364.6ms
+  p999 : 364.6ms
+  max  : 364.6ms

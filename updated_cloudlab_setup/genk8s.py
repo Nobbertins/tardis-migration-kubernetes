@@ -9,6 +9,9 @@ OUTPUT_DIR      = "k8s"
 WORKER_IMAGE    = "nobbertins/worker:latest"
 ORCH_IMAGE      = "nobbertins/orchestrator:latest"
 NAMESPACE       = "default"
+
+#usage
+#python genk8s.py --nodes alpha beta gamma
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -132,7 +135,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: orchestrator
-  namespace: {NAMESPACE}
+  namespace: orch
   labels:
     app: orchestrator
     role: orchestrator
@@ -174,7 +177,6 @@ def write_kustomization(app_ids, output_dir):
         "  disableNameSuffixHash: true",
         "",
         "resources:",
-        "  - orchestrator-deployment.yaml",
     ]
     for app_id in app_ids:
         lines.append(f"  - worker-{app_id}-deployment.yaml")

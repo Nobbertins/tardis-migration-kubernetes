@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir aiohttp psutil
 
-COPY collector.py .
+COPY collector_prom.py .
 
 EXPOSE 9100
-CMD ["python", "collector.py"]
+CMD ["python", "collector_prom.py"]

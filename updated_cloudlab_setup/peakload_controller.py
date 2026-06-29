@@ -27,8 +27,8 @@ from collections import defaultdict, deque
 import aiohttp
 
 # ── config ────────────────────────────────────────────────────────────────────
-POLL_INTERVAL   = float(os.environ.get("POLL_INTERVAL",   "5"))
-SCRAPE_INTERVAL = float(os.environ.get("SCRAPE_INTERVAL", "1"))
+POLL_INTERVAL   = 15.0
+SCRAPE_INTERVAL = 3.0
 LOAD_THRESHOLD  = float(os.environ.get("LOAD_THRESHOLD",  "80"))
 NAMESPACE       = os.environ.get("NAMESPACE",      "default")
 COLLECTOR_PORT  = int(os.environ.get("COLLECTOR_PORT", "9100"))
@@ -73,7 +73,7 @@ pod_trackers:  dict[tuple, PeakTracker] = defaultdict(lambda: PeakTracker(POLL_I
 def kubectl(*args) -> str:
     cmd = ["kubectl", *args]
     print(f"  $ {' '.join(cmd)}")
-    if DRY_RUN and any(a in ("taint", "patch", "delete") for a in args):
+    if DRY_RUN and any(a in ("taint", "patch", "delete", "scale", "pause", "resume") for a in args):
         print("  [dry-run skipped]")
         return ""
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -121,62 +121,129 @@ def get_worker_pods() -> dict[str, str]:
     return result
 
 
-def get_pod_deployment(pod: str) -> tuple[str, dict] | None:
-    """
-    Returns (deployment_name, original_node_selector) for the Deployment
-    that owns this pod, by following pod → ReplicaSet → Deployment.
-    """
+def get_pod_spec(pod: str) -> dict | None:
+    """Get the full pod spec from an existing pod to use as a template."""
     out = kubectl("get", "pod", "-n", NAMESPACE, pod, "-o", "json")
     if not out:
         return None
-    pod_data = json.loads(out)
+    return json.loads(out)
 
-    rs_name = None
-    for ref in pod_data.get("metadata", {}).get("ownerReferences", []):
-        if ref.get("kind") == "ReplicaSet":
-            rs_name = ref["name"]
-            break
-    if not rs_name:
-        print(f"  No ReplicaSet owner found for {pod}")
-        return None
 
-    out = kubectl("get", "replicaset", "-n", NAMESPACE, rs_name, "-o", "json")
-    if not out:
-        return None
-    rs_data = json.loads(out)
+def create_migration_pod(old_pod_data: dict, dst_node: str, new_pod_name: str) -> bool:
+    """
+    Create a standalone Pod on dst_node using the old pod's spec as a template.
+    Strips Deployment/ReplicaSet owner references so it's unmanaged.
+    Uses nodeName to pin directly to dst_node without touching the Deployment.
+    """
+    spec = old_pod_data["spec"]
 
-    deploy_name = None
-    for ref in rs_data.get("metadata", {}).get("ownerReferences", []):
-        if ref.get("kind") == "Deployment":
-            deploy_name = ref["name"]
-            break
-    if not deploy_name:
-        print(f"  No Deployment owner found for ReplicaSet {rs_name}")
-        return None
+    # override imagePullPolicy so migration pod uses cached image on dst_node
+    # instead of always pulling — avoids registry failures killing the pod
+    for container in spec.get("containers", []) + spec.get("initContainers", []):
+        container["imagePullPolicy"] = "IfNotPresent"
+        container.pop("terminationMessagePath", None)
+        container.pop("terminationMessagePolicy", None)
 
-    out = kubectl("get", "deployment", "-n", NAMESPACE, deploy_name, "-o", "json")
-    if not out:
-        return None
-    deploy_data = json.loads(out)
-    original_selector = (
-        deploy_data.get("spec", {})
-                   .get("template", {})
-                   .get("spec", {})
-                   .get("nodeSelector", {})
+    # pin directly to dst_node — no nodeSelector needed
+    spec["nodeName"] = dst_node
+    spec.pop("nodeSelector", None)
+
+    pod_manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": new_pod_name,
+            "namespace": NAMESPACE,
+            "labels": {
+                k: v for k, v in old_pod_data["metadata"].get("labels", {}).items()
+                if k != "pod-template-hash"  # ReplicaSet uses this to claim pods
+            },
+        },
+        "spec": {
+            **spec,
+            "nodeName": dst_node,
+            "restartPolicy": "Always",
+        },
+    }
+
+    manifest_str = json.dumps(pod_manifest)
+    print(f"  Creating migration pod {new_pod_name} on {dst_node}")
+    #print(f"  Manifest: {manifest_str[:500]}")
+    if DRY_RUN:
+        print("  [dry-run skipped]")
+        return True
+
+    result = subprocess.run(
+        ["kubectl", "apply", "-f", "-"],
+        input=manifest_str, capture_output=True, text=True
     )
-    return (deploy_name, original_selector)
+    print(f"  kubectl apply stdout: {result.stdout.strip()}")
+    if result.returncode != 0:
+        print(f"  Failed to create pod: {result.stderr.strip()}")
+        return False
+    # # immediately describe to catch any admission or scheduling errors
+    # time.sleep(1)
+    # desc = subprocess.run(
+    #     ["kubectl", "describe", "pod", "-n", NAMESPACE, new_pod_name],
+    #     capture_output=True, text=True
+    # )
+    # print(f"  describe: {desc.stdout[-800:] if desc.stdout else desc.stderr[-400:]}")
+    return True
 
 
-def patch_deployment_node_selector(deploy_name: str, node_selector: dict):
-    patch = json.dumps({"spec": {"template": {"spec": {"nodeSelector": node_selector}}}})
-    print(f"  Patching {deploy_name} nodeSelector → {node_selector}")
-    kubectl("patch", "deployment", "-n", NAMESPACE, deploy_name,
-            "--type=merge", f"--patch={patch}")
+def wait_for_pod_healthy(pod_name: str, dst_node: str, timeout: float = 120) -> bool:
+    """Wait until a named pod is Running and /health returns 200."""
+    import urllib.request
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        out = kubectl("get", "pod", "-n", NAMESPACE, pod_name, "-o", "json")
+        if out:
+            data = json.loads(out)
+            if data.get("status", {}).get("phase") == "Running":
+                pod_ip = data["status"].get("podIP", "")
+                if pod_ip:
+                    try:
+                        with urllib.request.urlopen(
+                            f"http://{pod_ip}:8080/health", timeout=2
+                        ) as r:
+                            if r.status == 200:
+                                print(f"  Pod {pod_name} healthy on {dst_node}")
+                                return True
+                    except Exception:
+                        pass
+        time.sleep(2)
+    print(f"  Warning: {pod_name} not healthy after {timeout}s")
+    return False
 
 
-def evict_pod(pod: str):
-    print(f"  Evicting pod {pod}")
-    kubectl("delete", "pod", "-n", NAMESPACE, pod, "--grace-period=0")
+def drain_worker(old_pod: str, task_timeout: float = 300):
+    """
+    POST /drain directly to the old pod's IP.
+    Blocks until the old pod confirms all in-flight tasks are done.
+    """
+    import http.client
+
+    out = kubectl("get", "pod", "-n", NAMESPACE, old_pod, "-o", "json")
+    if not out or DRY_RUN:
+        if DRY_RUN:
+            print("  [dry-run skipped drain]")
+        return
+    pod_data = json.loads(out)
+    pod_ip = pod_data.get("status", {}).get("podIP", "")
+    if not pod_ip:
+        print(f"  Could not get IP for {old_pod}, skipping drain")
+        return
+
+    print(f"  Draining {old_pod} at http://{pod_ip}:8080/drain")
+    try:
+        conn = http.client.HTTPConnection(pod_ip, 8080, timeout=5)
+        conn.request("POST", "/drain", body=b"")
+        conn.sock.settimeout(task_timeout)
+        resp = conn.getresponse()
+        print(f"  [{old_pod}] {resp.read().decode().strip()}")
+        conn.close()
+    except Exception as e:
+        print(f"  [{old_pod}] drain failed: {e} — proceeding anyway")
 
 
 # ── collector scraping ────────────────────────────────────────────────────────
@@ -309,23 +376,43 @@ async def decision_loop():
         dst_node  = min(all_loads, key=lambda n: all_loads[n])
         print(f"  Target node: {dst_node} (load={all_loads[dst_node]:.1f}%)")
 
-        # find the owning Deployment and its original nodeSelector
-        result = get_pod_deployment(pod)
-        if not result:
-            print(f"  Could not find Deployment for {pod}, skipping.")
+        # get old pod spec to use as template
+        old_pod_data = get_pod_spec(pod)
+        if not old_pod_data:
+            print(f"  Could not get spec for {pod}, skipping.")
             await asyncio.sleep(POLL_INTERVAL)
             continue
 
-        deploy_name, original_selector = result
+        # new pod name = old pod name + "-migration"
+        new_pod_name = f"{pod[:48]}-mig"
 
-        # patch nodeSelector to pin replacement pod to dst_node
-        dst_label = NODE_LABEL_MAP.get(dst_node, dst_node)
-        patch_deployment_node_selector(
-            deploy_name,
-            {NODE_LABEL_KEY: dst_label}
-        )
+        # 1. create standalone pod on dst_node — Deployment untouched
+        created = create_migration_pod(old_pod_data, dst_node, new_pod_name)
+        if not created:
+            print(f"  Failed to create migration pod, skipping.")
+            await asyncio.sleep(POLL_INTERVAL)
+            continue
 
-        evict_pod(pod)
+        # 2. wait for new pod to be Running and healthy
+        if not DRY_RUN:
+            healthy = wait_for_pod_healthy(new_pod_name, dst_node)
+            if not healthy:
+                print(f"  Migration pod never became healthy — cleaning up")
+                kubectl("delete", "pod", "-n", NAMESPACE, new_pod_name, "--grace-period=0")
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+
+        # 3. drain old pod — finishes current task, rejects new ones
+        #    orchestrator retries will go to new pod via service DNS
+        drain_worker(pod)
+
+        # 4. delete old pod — new pod is already serving
+        print(f"  Deleting old pod {pod}")
+        #worker-a03d8277f9ec95f7
+        if pod[-4:] == '-mig':
+            kubectl("delete", "pod", "-n", NAMESPACE, pod, "--grace-period=0")
+        else:
+            kubectl("delete", "deployment", "-n", NAMESPACE, pod[:23], "--grace-period=0")
         node_last_eviction[src_node] = time.time()
         await asyncio.sleep(POLL_INTERVAL)
 

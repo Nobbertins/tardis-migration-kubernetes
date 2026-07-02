@@ -22,7 +22,7 @@ import pandas as pd
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_WINDOW    = 600    # window size in seconds to evaluate
-TARGET_CALLS      = 3      # ideal calls-per-app within the window
+TARGET_CALLS      = 5      # ideal calls-per-app within the window
 MAX_CALLS         = 100     # exclude apps with more than this many calls (the "hundreds" filter)
 MIN_APPS          = 5       # window must have at least this many qualifying apps
 TOP_RESULTS       = 5       # how many candidate windows to print

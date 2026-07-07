@@ -382,6 +382,8 @@ def main():
     make_bar_chart(data, "p80", os.path.join(out_dir, "chart_p80.png"))
     make_bar_chart(data, "p90", os.path.join(out_dir, "chart_p90.png"))
     make_bar_chart(data, "p99", os.path.join(out_dir, "chart_p99.png"))
+    make_bar_chart(data, "p995", os.path.join(out_dir, "chart_p995.png"))
+    make_bar_chart(data, "p999", os.path.join(out_dir, "chart_p999.png"))
     make_combined_chart(data, os.path.join(out_dir, "chart_p50_p90_combined.png"))
 
     print("\nDone.")

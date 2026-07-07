@@ -719,7 +719,14 @@ async def decision_loop():
             await asyncio.sleep(POLL_INTERVAL)
             continue
 
-        new_pod_name = f"{pod[:48]}-mig"
+        # new pod name = old pod name + "-migration"
+        split_pod = pod.split("-mig")
+        true_pod = split_pod[0]
+        extension = ''
+        if len(split_pod) == 2:
+            if split_pod[1] != '':
+                extension = str(int(split_pod[1]) + 1)
+        new_pod_name = true_pod[:48] + '-mig' + extension
 
         # 1. create pod on destination
         created = create_migration_pod(old_pod_data, dst_node, new_pod_name)
@@ -746,7 +753,7 @@ async def decision_loop():
 
         # 5. delete old pod
         print(f"  Deleting old pod {pod}")
-        if pod[-4:] == '-mig':
+        if '-mig' in pod:
             kubectl("delete", "pod", "-n", NAMESPACE, pod, "--grace-period=0")
         else:
             kubectl("delete", "deployment", "-n", NAMESPACE, pod[:23], "--grace-period=0")

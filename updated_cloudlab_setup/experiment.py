@@ -2,8 +2,9 @@ import subprocess
 import sys
 import time
 
-REPEATS = 10
-SINGLE_RUN_TIME = 60 * 13 + 30 #30 sec extra so it doesn't end early for whatever reason
+REPEATS = 1
+MINUTES = 63
+SINGLE_RUN_TIME = 60 * MINUTES + 30 #30 sec extra so it doesn't end early for whatever reason
 
 def kubectl(*args) -> str:
     cmd = ["kubectl", *args]
@@ -28,7 +29,7 @@ def reset_orch():
     kubectl("delete", "pod", "-n", "orch", orch_pod)
     time.sleep(1)
     kubectl("apply", "-f", "k8s/orchestrator-deployment.yaml")
-    time.sleep(1)
+    time.sleep(2)
     orch_pod = kubectl("get", "pods", "-n", "orch", "-o", "jsonpath={.items[0].metadata.name}")
     idx = orch_pod.find("orchestrator")
     orch_pod = orch_pod[idx:idx+29]
@@ -90,5 +91,6 @@ for i in range(REPEATS):
     kubectl("delete", "pods", "-l", "role=worker") #delete migrated pods
 
 with open("exp_results.txt", "w") as f:
+    results += "EXPERIMENT DONE!!!\n"
     f.write(results)
     f.close()

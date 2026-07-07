@@ -1,0 +1,5 @@
+nano worker-85479ef37b5dc75d-deployment.yaml 
+(venv) ayaan@ayaan-16Z90TL-H-AUB9U1:~/Desktop/TARDIS/Kubernetes_AzureFunctions_Test/updated_cloudlab_setup/k8s$ nano worker-8edcb2c8634528c6-deployment.yaml 
+(venv) ayaan@ayaan-16Z90TL-H-AUB9U1:~/Desktop/TARDIS/Kubernetes_AzureFunctions_Test/updated_cloudlab_setup/k8s$ nano worker-18ed3ca44bd1f7d4-deployment.yaml 
+(venv) ayaan@ayaan-16Z90TL-H-AUB9U1:~/Desktop/TARDIS/Kubernetes_AzureFunctions_Test/updated_cloudlab_setup/k8s$ nano worker-f274d71de386ccc7-deployment.yaml 
+(venv) ayaan@ayaan-16Z90TL-H-AUB9U1:~/Desktop/TARDIS/Kubernetes_AzureFunctions_Test/updated_cloudlab_setup/k8s$ nano worker-f7bfe5bc8d2a37a5-deployment.yaml

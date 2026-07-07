@@ -212,7 +212,7 @@ async def run(invocations):
     # print(f"  p999 : {overheads[min(int(n * 0.999), n - 1)]:.1f}ms")
     # print(f"  max  : {overheads[-1]:.1f}ms")
     #RESULTS_FILE = f"/results/latencies{int(time.time())}.txt"
-    output = f"\n── Tail Latency Report (overhead = latency - duration) ──\n  Total invocations : {n}\n  Retried           : {retried}\np50  : {overheads[int(n * 0.50)]:.1f}ms\n  p60  : {overheads[int(n * 0.60)]:.1f}ms\n  p70  : {overheads[int(n * 0.70)]:.1f}ms\n  p80  : {overheads[int(n * 0.80)]:.1f}ms\n  p90  : {overheads[int(n * 0.90)]:.1f}ms\n  p99  : {overheads[int(n * 0.99)]:.1f}ms\n  max  : {overheads[-1]:.1f}ms"
+    output = f"\n── Tail Latency Report (overhead = latency - duration) ──\n  Total invocations : {n}\n  Retried           : {retried}\np50  : {overheads[int(n * 0.50)]:.1f}ms\n  p60  : {overheads[int(n * 0.60)]:.1f}ms\n  p70  : {overheads[int(n * 0.70)]:.1f}ms\n  p80  : {overheads[int(n * 0.80)]:.1f}ms\n  p90  : {overheads[int(n * 0.90)]:.1f}ms\n  p99  : {overheads[int(n * 0.99)]:.1f}ms\n  p995  : {overheads[int(n * 0.995)]:.1f}ms\n  p999  : {overheads[int(n * 0.999)]:.1f}ms\n  max  : {overheads[-1]:.1f}ms"
     print(output)
     dirpath = os.path.dirname(RESULTS_FILE)
     if dirpath:

@@ -8,7 +8,7 @@ import aiodns
 
 # ── config ────────────────────────────────────────────────────────────────────
 TRACE_FILE    = os.environ.get("TRACE_FILE", "trace.txt")
-START_DELAY   = int(os.environ.get("START_DELAY", "120"))
+START_DELAY   = int(os.environ.get("START_DELAY", "180"))
 TIME_SCALE    = float(os.environ.get("TIME_SCALE", "1.0"))
 WORKER_SVC    = os.environ.get("WORKER_SVC", "http://worker-{app_id}.default.svc.cluster.local:8080")
 RESULTS_FILE  = os.environ.get("RESULTS_FILE", "/results/latencies.txt")
@@ -18,9 +18,24 @@ WINDOW_END    = float(os.environ["WINDOW_END"])   if "WINDOW_END"   in os.enviro
 # retry config — used when a worker is evicted mid-task or restarting
 MAX_RETRIES   = int(os.environ.get("MAX_RETRIES", "5"))
 RETRY_DELAY   = float(os.environ.get("RETRY_DELAY", "2.0"))   # seconds between retries
+
+# Invocations at/under this duration are dropped as degenerate trace rows.
+# Must match MIN_DURATION_MS in graph_invocations.py — otherwise the graph
+# will show invocations for a window that the orchestrator never dispatches.
+MIN_DURATION_MS = float(os.environ.get("MIN_DURATION_MS", "0.01"))
 # ─────────────────────────────────────────────────────────────────────────────
 
 program_start = 0
+
+
+def make_entity_id(app_id, func_id, app_chars=12, func_chars=12):
+    """
+    Combine an app hash and a func hash into one k8s-safe deployment id,
+    e.g. worker-{entity_id}. Truncated (12+1+12=25 chars) to stay well
+    under the 63-char DNS label limit for Service/Deployment names while
+    keeping collision risk negligible (48 bits of entropy per half).
+    """
+    return f"{app_id.strip()[:app_chars]}-{func_id.strip()[:func_chars]}"
 
 
 def parse_trace(filepath):
@@ -32,7 +47,10 @@ def parse_trace(filepath):
             end_time    = float(row["end_timestamp"])
             start_time  = end_time - (duration_ms / 1000)
             invocations.append({
-                "app_id":      row["app"].strip()[:16],
+                # "app_id" now identifies one function deployment (app+func),
+                # not a whole application — kept as "app_id" to match the
+                # worker/service naming scheme (worker-{app_id}) unchanged.
+                "app_id":      make_entity_id(row["app"], row["func"]),
                 "start_time":  start_time,
                 "duration_ms": duration_ms,
             })
@@ -48,6 +66,16 @@ def normalize_times(invocations):
 
 
 def apply_window(invocations, window_start, window_end):
+    """
+    Keep only invocations that both start and end within [window_start,
+    window_end] (both are in "seconds since trace start", i.e. after
+    normalize_times() has already been applied to `invocations`).
+
+    NOTE: graph_invocations.py's pick_entities()/plot() use the identical
+    containment check (start >= t_start AND end <= t_end) plus the same
+    MIN_DURATION_MS drop, so a matching --start/--end there will show
+    exactly the invocations this function selects.
+    """
     filtered = invocations
     if window_start is not None:
         filtered = [i for i in filtered if i["start_time"] >= window_start]
@@ -55,7 +83,7 @@ def apply_window(invocations, window_start, window_end):
         filtered = [i for i in filtered
                     if i["start_time"] + i["duration_ms"] / 1000 <= window_end]
 
-    filtered = [i for i in filtered if i["duration_ms"] > 0.01]
+    filtered = [i for i in filtered if i["duration_ms"] > MIN_DURATION_MS]
 
     if filtered:
         min_start = filtered[0]["start_time"]

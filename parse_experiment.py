@@ -7,6 +7,8 @@ Expects a log file with sections separated by lines like:
   -------------------------------------------Starting Load Average-------------------------------------------
   -------------------------------------------Starting Tardis-------------------------------------------
 Each section contains 10 runs, each run ending with a Tail Latency Report block.
+
+python parse_experiment.py script.log folder
 """
 
 import re

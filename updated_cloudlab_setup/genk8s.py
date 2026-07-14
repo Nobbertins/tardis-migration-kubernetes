@@ -4,7 +4,7 @@ import os
 from collections import defaultdict
 
 # ── config ────────────────────────────────────────────────────────────────────
-TRACE_FILE      = "AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt"
+TRACE_FILE      = "../AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt"
 OUTPUT_DIR      = "k8s"
 WORKER_IMAGE    = "nobbertins/worker:latest"
 ORCH_IMAGE      = "nobbertins/orchestrator:latest"
@@ -15,26 +15,67 @@ NAMESPACE       = "default"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def parse_app_ids(filepath, limit=None):
-    app_ids = []
-    seen    = set()
+def make_entity_id(app_id, func_id, app_chars=12, func_chars=12):
+    """
+    Combine an app hash and a func hash into one k8s-safe deployment id,
+    e.g. worker-{entity_id}. Truncated (12+1+12=25 chars) to stay well
+    under the 63-char DNS label limit for Service/Deployment names while
+    keeping collision risk negligible (48 bits of entropy per half).
+    """
+    return f"{app_id.strip()[:app_chars]}-{func_id.strip()[:func_chars]}"
+
+
+# Must match MIN_DURATION_MS in orchestrator.py / graph_invocations.py, or
+# genk8s could generate a worker for a function whose only invocations the
+# orchestrator would actually drop as degenerate (near-zero duration), or
+# vice versa skip one the orchestrator would still run.
+MIN_DURATION_MS = 0.01
+
+
+def parse_entity_ids(filepath, min_start, window_start=None, window_end=None, limit=None):
+    """
+    Return sorted, deduped (app, func) deployment ids for functions with at
+    least one invocation that both starts and ends within [window_start,
+    window_end] — same normalized "seconds since trace start" coordinate
+    (start_time - min_start) and same containment check (start >= start,
+    end <= end) that orchestrator.py's apply_window() and
+    graph_invocations.py's pick_entities()/plot() use, so the set of workers
+    generated here exactly matches what the orchestrator will actually
+    dispatch invocations to for this window.
+    """
+    entity_ids = []
+    seen       = set()
     with open(filepath, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            app_id = row["app"].strip()[:16]
-            if app_id not in seen:
-                seen.add(app_id)
-                app_ids.append(app_id)
-            if limit and len(app_ids) >= limit:
+            duration = float(row["duration"])
+            if duration * 1000 <= MIN_DURATION_MS:
+                continue
+
+            end_time   = float(row["end_timestamp"])
+            start_time = end_time - duration
+            norm_start = start_time - min_start
+            norm_end   = norm_start + duration
+
+            if window_start is not None and norm_start < window_start:
+                continue
+            if window_end is not None and norm_end > window_end:
+                continue
+
+            entity_id = make_entity_id(row["app"], row["func"])
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entity_ids.append(entity_id)
+            if limit and len(entity_ids) >= limit:
                 break
     # Sort alphabetically so node assignment is identical every run
-    return sorted(app_ids)
+    return sorted(entity_ids)
 
 
 def parse_time_range(filepath):
-    """Return (min_start, max_start) across all invocations in the trace."""
+    """Return (min_start, max_end) across all invocations in the trace (raw coordinates)."""
     min_start = float("inf")
-    max_start = float("-inf")
+    max_end   = float("-inf")
     with open(filepath, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -42,8 +83,8 @@ def parse_time_range(filepath):
             end_time   = float(row["end_timestamp"])
             start_time = end_time - duration
             min_start  = min(min_start, start_time)
-            max_start  = max(max_start, start_time)
-    return min_start, max_start
+            max_end    = max(max_end, end_time)
+    return min_start, max_end
 
 
 def node_selector_snippet(node_name, indent=10):
@@ -200,7 +241,7 @@ def main():
     parser.add_argument("--nodes",          nargs="+", required=True,
                         help="List of node names to distribute pods across (e.g. --nodes node1 node2 node3)")
     parser.add_argument("--limit",          type=int,   default=None,
-                        help="Only generate for the first N apps")
+                        help="Only generate for the first N (app,func) deployments")
     parser.add_argument("--worker-image",   default=WORKER_IMAGE,
                         help="Docker image name for worker pods")
     parser.add_argument("--orch-image",     default=ORCH_IMAGE,
@@ -212,23 +253,35 @@ def main():
     parser.add_argument("--output-dir",     default=OUTPUT_DIR,
                         help="Directory to write YAML files into (default: k8s/)")
     parser.add_argument("--window-start",   type=float, default=None,
-                        help="Start of trace time window in seconds (default: beginning of trace)")
+                        help="Start of trace time window in seconds, normalized so 0 = the "
+                             "first invocation in the trace (same coordinate as WINDOW_START "
+                             "in orchestrator.py / --start in graph_invocations.py)")
     parser.add_argument("--window-end",     type=float, default=None,
-                        help="End of trace time window in seconds (default: end of trace)")
+                        help="End of trace time window in seconds, same normalized coordinate "
+                             "as --window-start (default: end of trace)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    min_start, max_start = parse_time_range(args.trace_file)
-    print(f"Trace time range: {min_start:.2f}s — {max_start:.2f}s")
+    min_start, max_end = parse_time_range(args.trace_file)
+    trace_span = max_end - min_start
+    print(f"Trace time range (normalized): 0.00s — {trace_span:.2f}s "
+          f"(raw start offset {min_start:.2f}s)")
     if args.window_start is not None or args.window_end is not None:
-        ws = args.window_start if args.window_start is not None else min_start
-        we = args.window_end   if args.window_end   is not None else max_start
+        ws = args.window_start if args.window_start is not None else 0.0
+        we = args.window_end   if args.window_end   is not None else trace_span
         print(f"Time window:      {ws:.2f}s — {we:.2f}s")
 
-    print(f"Reading app IDs from {args.trace_file}")
-    app_ids = parse_app_ids(args.trace_file, limit=args.limit)
-    print(f"Generating YAMLs for {len(app_ids)} apps")
+    print(f"Reading (app, func) pairs from {args.trace_file}")
+    if args.window_start is not None or args.window_end is not None:
+        print(f"  restricting to functions with an invocation fully inside "
+              f"[{ws:.2f}s, {we:.2f}s]")
+    app_ids = parse_entity_ids(
+        args.trace_file, min_start,
+        window_start=args.window_start, window_end=args.window_end,
+        limit=args.limit,
+    )
+    print(f"Generating YAMLs for {len(app_ids)} function deployments")
 
     nodes      = sorted(args.nodes)
     node_map   = assign_nodes(app_ids, nodes)

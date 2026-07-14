@@ -55,20 +55,58 @@ def axis_formatter(span: float):
 
 # ── data ──────────────────────────────────────────────────────────────────────
 
-def load(csv_path: Path) -> pd.DataFrame:
+# Must match orchestrator.py's MIN_DURATION_MS exactly, or the two scripts
+# will disagree on which invocations count as "real" (orchestrator drops
+# anything at/under this duration before dispatching).
+MIN_DURATION_MS = 0.01
+
+def load(csv_path: Path, group_by: str = "function", normalize: bool = True) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
     df["start"] = df["end_timestamp"] - df["duration"]
+
+    if normalize:
+        # Mirror orchestrator.py's normalize_times(): shift so the earliest
+        # invocation in the WHOLE file starts at t=0. WINDOW_START/WINDOW_END
+        # passed to the orchestrator are in this same "seconds since trace
+        # start" coordinate — without this shift, --start/--end here would
+        # select a different slice of the trace than the orchestrator does.
+        shift = df["start"].min()
+        df["start"] -= shift
+        df["end_timestamp"] = df["start"] + df["duration"]
+
+    # Match orchestrator's apply_window(), which drops invocations at/under
+    # this duration regardless of window bounds. Without this, the graph can
+    # show more invocations in a window than the orchestrator actually runs.
+    df = df[df["duration"] * 1000 > MIN_DURATION_MS].reset_index(drop=True)
+
+    # "entity" is whatever we're grouping/lane-packing/plotting by.
+    # group_by="function" -> one row per (app, func) pair (deployment granularity)
+    # group_by="app"      -> legacy behavior, one row per app
+    if group_by == "function":
+        df["entity"] = df["app"].astype(str).str.strip() + "::" + df["func"].astype(str).str.strip()
+    else:
+        df["entity"] = df["app"].astype(str).str.strip()
     return df
 
-def pick_apps(df: pd.DataFrame, top_n: int, min_dur: float,
-              t_start: float, t_end: float) -> list:
+def entity_label(entity: str, chars: int = LABEL_CHARS) -> str:
+    """Short display label for an entity id, e.g. 'app123.../func456...'."""
+    if "::" in entity:
+        app_part, func_part = entity.split("::", 1)
+        half = max(chars // 2, 4)
+        return f"{app_part[:half]}/{func_part[:half]}"
+    return entity[:chars]
+
+def pick_entities(df: pd.DataFrame, top_n: int, min_dur: float,
+                   t_start: float, t_end: float) -> list:
+    # "start and end within the window" — must match orchestrator's
+    # apply_window() containment check exactly (start >= start, end <= end).
     in_window = df[
         (df["duration"] >= min_dur) &
         (df["start"] >= t_start) &
         (df["end_timestamp"] <= t_end)
     ]
-    counts = in_window.groupby("app").size().sort_values(ascending=False)
+    counts = in_window.groupby("entity").size().sort_values(ascending=False)
     return counts.head(top_n).index.tolist()
 
 # ── lane packing ──────────────────────────────────────────────────────────────
@@ -110,11 +148,11 @@ def concurrency_curve(subset: pd.DataFrame, t_start: float, t_end: float, bins: 
 
 # ── plot ──────────────────────────────────────────────────────────────────────
 
-def plot(df: pd.DataFrame, apps: list, t_start: float, t_end: float,
+def plot(df: pd.DataFrame, entities: list, t_start: float, t_end: float,
          min_dur: float, out: Path):
 
     mask = (
-        df["app"].isin(apps) &
+        df["entity"].isin(entities) &
         (df["duration"] >= min_dur) &
         (df["start"] >= t_start) &
         (df["end_timestamp"] <= t_end)
@@ -124,29 +162,29 @@ def plot(df: pd.DataFrame, apps: list, t_start: float, t_end: float,
     subset["vis_end"]   = subset["end_timestamp"].clip(upper=t_end)
     subset["vis_dur"]   = (subset["vis_end"] - subset["vis_start"]).clip(lower=MIN_BAR_PX)
 
-    color_map = {app: COLORS[i % len(COLORS)] for i, app in enumerate(apps)}
+    color_map = {ent: COLORS[i % len(COLORS)] for i, ent in enumerate(entities)}
 
-    # ── lane assignment per app ───────────────────────────────────────────────
+    # ── lane assignment per entity ────────────────────────────────────────────
     subset["lane"] = 0
-    for app, grp in subset.groupby("app"):
+    for ent, grp in subset.groupby("entity"):
         subset.loc[grp.index, "lane"] = assign_lanes(grp).values
 
-    max_lanes_per_app = subset.groupby("app")["lane"].max() + 1   # Series
+    max_lanes_per_entity = subset.groupby("entity")["lane"].max() + 1   # Series
 
-    # build y mapping: each app gets as many sub-rows as it needs
-    # y_base[app] = bottom y of the app's block; height = max_lanes
-    app_order = list(reversed(apps))   # bottom to top
+    # build y mapping: each entity gets as many sub-rows as it needs
+    # y_base[ent] = bottom y of the entity's block; height = max_lanes
+    entity_order = list(reversed(entities))   # bottom to top
     y_base = {}
     y_cursor = 0
-    for app in app_order:
-        y_base[app] = y_cursor
-        y_cursor += max_lanes_per_app.get(app, 1)
+    for ent in entity_order:
+        y_base[ent] = y_cursor
+        y_cursor += max_lanes_per_entity.get(ent, 1)
 
     total_rows = y_cursor
     BAR_H = 0.82   # bar height in row units
 
     # ── figure layout ─────────────────────────────────────────────────────────
-    n_apps    = len(apps)
+    n_entities = len(entities)
     gantt_h   = max(4, total_rows * max(0.18, min(0.45, 12 / total_rows)))
     concur_h  = 1.8
     fig_h     = gantt_h + concur_h + 1.2
@@ -159,18 +197,18 @@ def plot(df: pd.DataFrame, apps: list, t_start: float, t_end: float,
     ax_c = fig.add_subplot(gs[1])   # concurrency
 
     # ── gantt ─────────────────────────────────────────────────────────────────
-    # zebra stripes per app block
-    for app in app_order:
-        yb = y_base[app]
-        nh = max_lanes_per_app.get(app, 1)
-        col = "#f5f5f5" if (app_order.index(app) % 2 == 0) else "white"
+    # zebra stripes per entity block
+    for ent in entity_order:
+        yb = y_base[ent]
+        nh = max_lanes_per_entity.get(ent, 1)
+        col = "#f5f5f5" if (entity_order.index(ent) % 2 == 0) else "white"
         ax_g.axhspan(yb - 0.5, yb + nh - 0.5, color=col, zorder=0)
 
     for _, row in subset.iterrows():
-        app  = row["app"]
+        ent  = row["entity"]
         lane = int(row["lane"])
-        y    = y_base[app] + lane
-        col  = color_map[app]
+        y    = y_base[ent] + lane
+        col  = color_map[ent]
         bar  = mpatches.FancyArrow(
             row["vis_start"], y, row["vis_dur"], 0,
             width=BAR_H, head_width=0, head_length=0,
@@ -179,26 +217,26 @@ def plot(df: pd.DataFrame, apps: list, t_start: float, t_end: float,
         )
         ax_g.add_patch(bar)
 
-    # y-axis: one label per app, centred on its block
+    # y-axis: one label per entity, centred on its block
     yticks, ylabels = [], []
-    for app in app_order:
-        yb = y_base[app]
-        nh = max_lanes_per_app.get(app, 1)
+    for ent in entity_order:
+        yb = y_base[ent]
+        nh = max_lanes_per_entity.get(ent, 1)
         yticks.append(yb + (nh - 1) / 2)
-        ylabels.append(app[:LABEL_CHARS] + "...")
+        ylabels.append(entity_label(ent))
 
     ax_g.set_yticks(yticks)
     ax_g.set_yticklabels(ylabels, fontsize=7.5, fontfamily="monospace")
-    for tick, app in zip(ax_g.get_yticklabels(), app_order):
-        tick.set_color(color_map[app])
+    for tick, ent in zip(ax_g.get_yticklabels(), entity_order):
+        tick.set_color(color_map[ent])
 
     # right-side call counts
     ax_r = ax_g.twinx()
     ax_r.set_ylim(ax_g.get_ylim())
     ax_r.set_yticks(yticks)
-    counts_in_win = subset.groupby("app").size()
+    counts_in_win = subset.groupby("entity").size()
     ax_r.set_yticklabels(
-        [f"{counts_in_win.get(a, 0)} calls" for a in app_order],
+        [f"{counts_in_win.get(a, 0)} calls" for a in entity_order],
         fontsize=6.5, color="#999",
     )
     ax_r.tick_params(right=False)
@@ -216,8 +254,9 @@ def plot(df: pd.DataFrame, apps: list, t_start: float, t_end: float,
     ax_g.spines[["top","right","left"]].set_visible(False)
 
     avg_dur = subset["duration"].mean() if len(subset) else 0
+    unit = "functions" if subset["entity"].str.contains("::").any() else "apps"
     ax_g.set_title(
-        f"{len(subset):,} calls  |  {n_apps} apps  |  "
+        f"{len(subset):,} calls  |  {n_entities} {unit}  |  "
         f"window {fmt_time(t_start)} -> {fmt_time(t_end)}  |  "
         f"span {fmt_time(span)}  |  avg dur {avg_dur:.3f}s",
         fontsize=9, pad=6,
@@ -252,7 +291,7 @@ def plot(df: pd.DataFrame, apps: list, t_start: float, t_end: float,
                   arrowprops=dict(arrowstyle="-", color="#4A7FD4", lw=0.8))
 
     plt.savefig(out, dpi=DPI, bbox_inches="tight", facecolor="white")
-    print(f"Saved -> {out}  ({len(subset):,} calls, {n_apps} apps, peak concurrency {peak})")
+    print(f"Saved -> {out}  ({len(subset):,} calls, {n_entities} entities, peak concurrency {peak})")
     plt.close(fig)
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -261,10 +300,20 @@ def main():
     parser = argparse.ArgumentParser(description="Gantt chart for function invocations")
     parser.add_argument("csv",       nargs="?", default=DEFAULT_CSV)
     parser.add_argument("--out",     default=DEFAULT_OUT)
-    parser.add_argument("--start",   type=float, default=None,  help="Window start (seconds)")
-    parser.add_argument("--end",     type=float, default=None,  help="Window end (seconds)")
-    parser.add_argument("--min-dur", type=float, default=0.0,   help="Min call duration to show (s)")
-    parser.add_argument("--top",     type=int,   default=TOP_N, help="Max apps to show")
+    parser.add_argument("--start",   type=float, default=None,  help="Window start (seconds, same coordinate as WINDOW_START in orchestrator.py)")
+    parser.add_argument("--end",     type=float, default=None,  help="Window end (seconds, same coordinate as WINDOW_END in orchestrator.py)")
+    parser.add_argument("--min-dur", type=float, default=MIN_DURATION_MS / 1000,
+                        help=f"Min call duration to show (s). Defaults to orchestrator's "
+                             f"drop threshold ({MIN_DURATION_MS}ms) so counts match.")
+    parser.add_argument("--top",     type=int,   default=TOP_N, help="Max entities to show")
+    parser.add_argument("--group-by", choices=["function", "app"], default="function",
+                        help="Group/plot by (app,func) pair [default] or by app alone")
+    parser.add_argument("--no-normalize", action="store_true",
+                        help="Use raw CSV timestamps as-is instead of shifting the trace "
+                             "to start at t=0. Only use this if orchestrator.py's own "
+                             "normalize_times() was also skipped/disabled — otherwise "
+                             "--start/--end will select a different window than the "
+                             "orchestrator ran.")
     args = parser.parse_args()
 
     csv_path = Path(args.csv)
@@ -272,8 +321,18 @@ def main():
         sys.exit(f"Error: '{csv_path}' not found.")
 
     print(f"Loading {csv_path} ...")
-    df = load(csv_path)
-    print(f"  {len(df):,} rows, {df['app'].nunique()} unique apps")
+    raw_min = pd.read_csv(csv_path, usecols=["end_timestamp", "duration"]).pipe(
+        lambda d: (d["end_timestamp"] - d["duration"]).min()
+    )
+    df = load(csv_path, group_by=args.group_by, normalize=not args.no_normalize)
+    if not args.no_normalize:
+        print(f"  normalized: shifted timestamps by -{raw_min:.3f}s so trace starts at t=0 "
+              f"(matches orchestrator.py's normalize_times)")
+    if args.group_by == "function":
+        print(f"  {len(df):,} rows, {df['entity'].nunique()} unique functions "
+              f"across {df['app'].nunique()} apps")
+    else:
+        print(f"  {len(df):,} rows, {df['entity'].nunique()} unique apps")
 
     t_min = df["start"].min()
     t_max = df["end_timestamp"].max()
@@ -282,11 +341,11 @@ def main():
     t_start = args.start if args.start is not None else t_min
     t_end   = args.end   if args.end   is not None else t_max
 
-    apps = pick_apps(df, args.top, args.min_dur, t_start, t_end)
-    if not apps:
-        sys.exit("No apps match the filters.")
+    entities = pick_entities(df, args.top, args.min_dur, t_start, t_end)
+    if not entities:
+        sys.exit("No entities match the filters.")
 
-    plot(df, apps, t_start, t_end, args.min_dur, Path(args.out))
+    plot(df, entities, t_start, t_end, args.min_dur, Path(args.out))
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-c8c43e1a911f29e5
+  namespace: default
+  labels:
+    app: worker-c8c43e1a911f29e5
+    role: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-c8c43e1a911f29e5
+  template:
+    metadata:
+      labels:
+        app: worker-c8c43e1a911f29e5
+        role: worker
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/node-name: beta
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      containers:
+        - name: worker
+          image: nobbertins/worker:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5

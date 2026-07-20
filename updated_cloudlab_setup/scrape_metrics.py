@@ -9,6 +9,7 @@ and merges everything into a single CSV.
 Usage:
     python scrape_metrics.py [--since <unix_ts>] [--out merged_metrics.csv]
     python scrape_metrics.py --flush          # POST /flush on each pod first
+    python scrape_metrics.py --since <unix_ts> --duration 3600   # 1 hour window
 """
 
 import argparse
@@ -84,6 +85,9 @@ def main():
                     help="Only include samples after this unix timestamp")
     ap.add_argument("--until", type=float, default=None,
                     help="Only include samples before this unix timestamp")
+    ap.add_argument("--duration", type=float, default=None,
+                    help="Window length in seconds, applied as until = since + duration. "
+                         "Requires --since. Mutually exclusive with --until.")
     ap.add_argument("--out", default="merged_metrics.csv",
                     help="Output CSV path")
     ap.add_argument("--flush", action="store_true",
@@ -92,17 +96,35 @@ def main():
                     help="Base local port for port-forward (incremented per pod)")
     args = ap.parse_args()
 
+    if args.duration is not None:
+        if args.until is not None:
+            ap.error("--duration cannot be combined with --until")
+        if args.since is None:
+            ap.error("--duration requires --since")
+        if args.duration <= 0:
+            ap.error("--duration must be positive")
+        args.until = args.since + args.duration
+
     pods = get_pod_names()
     if not pods:
         print("No collector pods found.", file=sys.stderr)
         sys.exit(1)
     print(f"Found {len(pods)} collector pod(s): {pods}")
+    if args.since is not None or args.until is not None:
+        print(f"Window: since={args.since} until={args.until}")
 
     all_rows: list[dict] = []
     for i, pod in enumerate(pods):
         print(f"Scraping {pod} …")
-        rows = scrape_pod(pod, args.since, args.until, args.flush, args.port + i)
-        all_rows.extend(rows)
+        try:
+            rows = scrape_pod(pod, args.since, args.until, args.flush, args.port + i)
+            all_rows.extend(rows)
+        except Exception as e:
+            # A single pod failing (e.g. crashing under the weight of a huge
+            # unbounded /metrics response) shouldn't lose the data already
+            # scraped from the other pods.
+            print(f"  {pod}: failed ({e}), skipping", file=sys.stderr)
+            continue
 
     all_rows.sort(key=lambda r: float(r["timestamp"]))
 

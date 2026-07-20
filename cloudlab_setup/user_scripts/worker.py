@@ -21,7 +21,7 @@ def burn_cpu(duration_s, intensity):
     start_time = time.time()
     subprocess.run([
         "timeout", f"{duration_s}", "stress-ng",
-        "--cpu", "0", "--cpu-load", "30"
+        "--cpu", "0", "--cpu-load", "40"
     ])
     return start_time
 

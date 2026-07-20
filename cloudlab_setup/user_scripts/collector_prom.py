@@ -180,18 +180,31 @@ async def handle_metrics(request):
     data = samples
     if since:
         try:
-            data = [s for s in samples if s["timestamp"] >= float(since)]
+            since_f = float(since)
         except ValueError:
             raise web.HTTPBadRequest(text="'since' must be a unix timestamp")
+        data = [s for s in samples if s["timestamp"] >= since_f]
 
     if fmt == "csv":
-        lines = ["timestamp,node,cpu_pct,pods"]
-        for s in data:
-            pods_json = json.dumps(s.get("pods", {}))
-            lines.append(f"{s['timestamp']},{s['node']},{s['cpu_pct']},\"{pods_json}\"")
-        return web.Response(text="\n".join(lines), content_type="text/csv")
+        # Building the full CSV synchronously here blocks the event loop for
+        # the duration of the join — with tens of thousands of samples that
+        # can be long enough to miss the /health liveness probe (or spike
+        # memory past the pod's limit) and get the container killed mid
+        # response, which surfaces to scrapers as IncompleteRead. Offload
+        # the CPU-bound formatting to a thread so /health stays responsive.
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(None, _build_csv, data)
+        return web.Response(text=text, content_type="text/csv")
 
     return web.json_response(data)
+
+
+def _build_csv(data):
+    lines = ["timestamp,node,cpu_pct,pods"]
+    for s in data:
+        pods_json = json.dumps(s.get("pods", {}))
+        lines.append(f"{s['timestamp']},{s['node']},{s['cpu_pct']},\"{pods_json}\"")
+    return "\n".join(lines)
 
 
 async def handle_latest(request):

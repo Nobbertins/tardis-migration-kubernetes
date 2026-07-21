@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-f7bfe5bc8d2a-34f4775366e5
+  namespace: default
+spec:
+  selector:
+    app: worker-f7bfe5bc8d2a-34f4775366e5
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080

@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: orch
+  labels:
+    app: orchestrator
+    role: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        role: orchestrator
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/node-name: alpha
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      containers:
+        - name: orchestrator
+          image: nobbertins/orchestrator:latest
+          imagePullPolicy: Always
+          env:
+            - name: TRACE_FILE
+              value: "/app/AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt"
+            - name: START_DELAY
+              value: "180"
+            - name: TIME_SCALE
+              value: "1.0"
+            - name: RESULTS_FILE
+              value: "/results/latencies.csv"
+            - name: WINDOW_START
+              value: "734400.0"
+            - name: WINDOW_END
+              value: "738000.0"
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          emptyDir: {}

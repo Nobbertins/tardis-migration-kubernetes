@@ -1,0 +1,67 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+resources:
+  - worker-17c37a0fdd5d-c9f8e30e36d1-deployment.yaml
+  - worker-17c37a0fdd5d-c9f8e30e36d1-service.yaml
+  - worker-18ed3ca44bd1-04bf55f0a9d7-deployment.yaml
+  - worker-18ed3ca44bd1-04bf55f0a9d7-service.yaml
+  - worker-18ed3ca44bd1-97d6075b5c2b-deployment.yaml
+  - worker-18ed3ca44bd1-97d6075b5c2b-service.yaml
+  - worker-4fd9ef036fda-50bb98931d9e-deployment.yaml
+  - worker-4fd9ef036fda-50bb98931d9e-service.yaml
+  - worker-4fd9ef036fda-dea190b390aa-deployment.yaml
+  - worker-4fd9ef036fda-dea190b390aa-service.yaml
+  - worker-5fb02cfeb979-8e5f533dbf10-deployment.yaml
+  - worker-5fb02cfeb979-8e5f533dbf10-service.yaml
+  - worker-68d84244f6a3-ca8b2d1318a1-deployment.yaml
+  - worker-68d84244f6a3-ca8b2d1318a1-service.yaml
+  - worker-6e42a4e8ea1d-7b80f7289771-deployment.yaml
+  - worker-6e42a4e8ea1d-7b80f7289771-service.yaml
+  - worker-6e42a4e8ea1d-bbb2ba81bf86-deployment.yaml
+  - worker-6e42a4e8ea1d-bbb2ba81bf86-service.yaml
+  - worker-7b2c43a2bc30-68bbfd828223-deployment.yaml
+  - worker-7b2c43a2bc30-68bbfd828223-service.yaml
+  - worker-7b2c43a2bc30-e3cdb48830f6-deployment.yaml
+  - worker-7b2c43a2bc30-e3cdb48830f6-service.yaml
+  - worker-85479ef37b5d-1f33077bb2db-deployment.yaml
+  - worker-85479ef37b5d-1f33077bb2db-service.yaml
+  - worker-85479ef37b5d-49535532e285-deployment.yaml
+  - worker-85479ef37b5d-49535532e285-service.yaml
+  - worker-85479ef37b5d-4a4146ed669e-deployment.yaml
+  - worker-85479ef37b5d-4a4146ed669e-service.yaml
+  - worker-85479ef37b5d-514a9bcff07d-deployment.yaml
+  - worker-85479ef37b5d-514a9bcff07d-service.yaml
+  - worker-85479ef37b5d-cd9f7f333d59-deployment.yaml
+  - worker-85479ef37b5d-cd9f7f333d59-service.yaml
+  - worker-85479ef37b5d-d880a3e25b4b-deployment.yaml
+  - worker-85479ef37b5d-d880a3e25b4b-service.yaml
+  - worker-85479ef37b5d-e02465de583b-deployment.yaml
+  - worker-85479ef37b5d-e02465de583b-service.yaml
+  - worker-85479ef37b5d-e6df36937abc-deployment.yaml
+  - worker-85479ef37b5d-e6df36937abc-service.yaml
+  - worker-85479ef37b5d-ebfe951bf36a-deployment.yaml
+  - worker-85479ef37b5d-ebfe951bf36a-service.yaml
+  - worker-8edcb2c86345-0eb88b877c65-deployment.yaml
+  - worker-8edcb2c86345-0eb88b877c65-service.yaml
+  - worker-97b9300c3b00-4edff411391e-deployment.yaml
+  - worker-97b9300c3b00-4edff411391e-service.yaml
+  - worker-a55aa23d7c2a-26709bc96ccb-deployment.yaml
+  - worker-a55aa23d7c2a-26709bc96ccb-service.yaml
+  - worker-a55aa23d7c2a-2cf25c6b121c-deployment.yaml
+  - worker-a55aa23d7c2a-2cf25c6b121c-service.yaml
+  - worker-a594f92f8407-155e47f8e7f7-deployment.yaml
+  - worker-a594f92f8407-155e47f8e7f7-service.yaml
+  - worker-a69fc53dccda-ec5e0d5b0eda-deployment.yaml
+  - worker-a69fc53dccda-ec5e0d5b0eda-service.yaml
+  - worker-c8c43e1a911f-653cdbc309bc-deployment.yaml
+  - worker-c8c43e1a911f-653cdbc309bc-service.yaml
+  - worker-ca4fde7aa358-b7e7d0530112-deployment.yaml
+  - worker-ca4fde7aa358-b7e7d0530112-service.yaml
+  - worker-f274d71de386-3d2aee54a133-deployment.yaml
+  - worker-f274d71de386-3d2aee54a133-service.yaml
+  - worker-f7bfe5bc8d2a-34f4775366e5-deployment.yaml
+  - worker-f7bfe5bc8d2a-34f4775366e5-service.yaml

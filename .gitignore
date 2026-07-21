@@ -1,5 +1,4 @@
 AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt
-k8s
 venv
 oldk8s
 firstry
@@ -7,3 +6,5 @@ bigresults
 thirdtry
 fourthtry
 merged_metrics.csv
+azurefunctions_2019_day1.txt
+azurefunctions_dataset2019

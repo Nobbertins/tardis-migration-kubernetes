@@ -1,0 +1,17 @@
+Policy,Run,p50,p60,p70,p80,p90,p99,max
+
+Load Peak,MEAN,,,,,,,
+Load Peak,STDEV,,,,,,,
+
+
+Load Avg,MEAN,,,,,,,
+Load Avg,STDEV,,,,,,,
+
+
+No Mig,MEAN,,,,,,,
+No Mig,STDEV,,,,,,,
+
+
+Tardis,MEAN,,,,,,,
+Tardis,STDEV,,,,,,,
+

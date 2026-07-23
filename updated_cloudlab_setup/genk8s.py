@@ -144,6 +144,8 @@ def orchestrator_deployment(image, trace_file, start_delay, time_scale,
     env = f"""\
             - name: TRACE_FILE
               value: "{trace_file}"
+            - name: ALLOWED_APPS_FILE
+              value: "/app/active_funcs.txt"
             - name: START_DELAY
               value: "{start_delay}"
             - name: TIME_SCALE

@@ -8,6 +8,7 @@ import aiodns
 
 # ── config ────────────────────────────────────────────────────────────────────
 TRACE_FILE    = os.environ.get("TRACE_FILE", "trace.txt")
+ALLOWED_APPS_FILE = os.environ.get("ALLOWED_APPS_FILE")  # optional: path to a text file listing allowed funcs
 START_DELAY   = int(os.environ.get("START_DELAY", "180"))
 TIME_SCALE    = float(os.environ.get("TIME_SCALE", "1.0"))
 WORKER_SVC    = os.environ.get("WORKER_SVC", "http://worker-{app_id}.default.svc.cluster.local:8080")
@@ -51,11 +52,40 @@ def parse_trace(filepath):
                 # not a whole application — kept as "app_id" to match the
                 # worker/service naming scheme (worker-{app_id}) unchanged.
                 "app_id":      make_entity_id(row["app"], row["func"]),
+                # kept separately (not truncated) so the allow-list can
+                # filter on func name alone — func ids are globally unique
+                # across apps, so no app qualifier is needed.
+                "func_id":     (row["func"].strip())[:16],
                 "start_time":  start_time,
                 "duration_ms": duration_ms,
             })
     invocations.sort(key=lambda x: x["start_time"])
     return invocations
+
+
+def load_allowed_apps(filepath):
+    """
+    Read a text file of allowed func names (one per line, '#' comments
+    and blank lines ignored) and return them as a set.
+
+    Func ids are globally unique across apps, so no app qualifier is
+    needed — filtering matches inv["func_id"] directly against this set.
+    """
+    allowed = set()
+    with open(filepath) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            allowed.add(line)
+    return allowed
+
+
+def filter_allowed_apps(invocations, allowed_funcs):
+    filtered = [inv for inv in invocations if inv["func_id"] in allowed_funcs]
+    print(f"Filtered to {len(filtered)}/{len(invocations)} invocations "
+          f"matching {len(allowed_funcs)} allowed func(s)")
+    return filtered
 
 
 def normalize_times(invocations):
@@ -214,9 +244,9 @@ async def run(invocations):
                 await asyncio.sleep(wait)
 
             send_time = time.time()
-            print(f"({send_time - program_start:.1f}s) [{inv['app_id']}] dispatching duration={inv['duration_ms']:.0f}ms")
+            print(f"({send_time - program_start:.1f}s) [{inv['func_id']}] dispatching duration={inv['duration_ms']:.0f}ms")
             task = asyncio.create_task(
-                dispatch(session, inv["app_id"], inv["duration_ms"], send_time, results)
+                dispatch(session, inv["func_id"], inv["duration_ms"], send_time, results)
             )
             tasks.append(task)
 
@@ -227,19 +257,6 @@ async def run(invocations):
     overheads = sorted(r["overhead_ms"] for r in results)
     n = len(overheads)
     retried = sum(1 for r in results if r["retries"] > 0)
-    # print(f"\n── Tail Latency Report (overhead = latency - duration) ──")
-    # print(f"  Total invocations : {n}")
-    # print(f"  Retried           : {retried}")
-    # print(f"  p50  : {overheads[int(n * 0.50)]:.1f}ms")       # short TTL so migrated pods are found quickly
-    # print(f"  p60  : {overheads[int(n * 0.60)]:.1f}ms")
-    # print(f"  p70  : {overheads[int(n * 0.70)]:.1f}ms")
-    # print(f"  p80  : {overheads[int(n * 0.80)]:.1f}ms")
-    # print(f"  p90  : {overheads[int(n * 0.90)]:.1f}ms")
-    # print(f"  p95  : {overheads[int(n * 0.95)]:.1f}ms")
-    # print(f"  p99  : {overheads[int(n * 0.99)]:.1f}ms")
-    # print(f"  p999 : {overheads[min(int(n * 0.999), n - 1)]:.1f}ms")
-    # print(f"  max  : {overheads[-1]:.1f}ms")
-    #RESULTS_FILE = f"/results/latencies{int(time.time())}.txt"
     output = f"\n── Tail Latency Report (overhead = latency - duration) ──\n  Total invocations : {n}\n  Retried           : {retried}\np50  : {overheads[int(n * 0.50)]:.1f}ms\n  p60  : {overheads[int(n * 0.60)]:.1f}ms\n  p70  : {overheads[int(n * 0.70)]:.1f}ms\n  p80  : {overheads[int(n * 0.80)]:.1f}ms\n  p90  : {overheads[int(n * 0.90)]:.1f}ms\n  p99  : {overheads[int(n * 0.99)]:.1f}ms\n  p995  : {overheads[int(n * 0.995)]:.1f}ms\n  p999  : {overheads[int(n * 0.999)]:.1f}ms\n  max  : {overheads[-1]:.1f}ms"
     print(output)
     dirpath = os.path.dirname(RESULTS_FILE)
@@ -253,6 +270,15 @@ def main():
 
     print(f"Reading trace from {TRACE_FILE}")
     invocations = parse_trace(TRACE_FILE)
+
+    if ALLOWED_APPS_FILE:
+        print(f"Reading allowed func list from {ALLOWED_APPS_FILE}")
+        allowed_funcs = load_allowed_apps(ALLOWED_APPS_FILE)
+        invocations = filter_allowed_apps(invocations, allowed_funcs)
+        if not invocations:
+            print("No invocations match the allowed func list, exiting.")
+            return
+
     invocations = normalize_times(invocations)
 
     print(f"Loaded {len(invocations)} invocations before windowing")

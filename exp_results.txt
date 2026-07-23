@@ -1,39 +1,9 @@
 -------------------------------------------Starting Load Peak-------------------------------------------
 -----------------------------------------
--------------------------------------------Starting No Mig-------------------------------------------Traceback (most recent call last):
-  File "/app/orchestrator.py", line 271, in <module>
-Reading trace from /app/azurefunctions_2019_day1.txt
-    main()
-  File "/app/orchestrator.py", line 255, in main
-    invocations = parse_trace(TRACE_FILE)
-                  ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/app/orchestrator.py", line 43, in parse_trace
-    with open(filepath, newline="") as f:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^
-FileNotFoundError: [Errno 2] No such file or directory: '/app/azurefunctions_2019_day1.txt'
+-------------------------------------------Starting No Mig-------------------------------------------
 -----------------------------------------
--------------------------------------------Starting Load Avg-------------------------------------------Traceback (most recent call last):
-  File "/app/orchestrator.py", line 271, in <module>
-Reading trace from /app/azurefunctions_2019_day1.txt
-    main()
-  File "/app/orchestrator.py", line 255, in main
-    invocations = parse_trace(TRACE_FILE)
-                  ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/app/orchestrator.py", line 43, in parse_trace
-    with open(filepath, newline="") as f:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^
-FileNotFoundError: [Errno 2] No such file or directory: '/app/azurefunctions_2019_day1.txt'
+-------------------------------------------Starting Load Avg-------------------------------------------
 -----------------------------------------
--------------------------------------------Starting TARDIS-------------------------------------------Reading trace from /app/azurefunctions_2019_day1.txt
-Traceback (most recent call last):
-  File "/app/orchestrator.py", line 271, in <module>
-    main()
-  File "/app/orchestrator.py", line 255, in main
-    invocations = parse_trace(TRACE_FILE)
-                  ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/app/orchestrator.py", line 43, in parse_trace
-    with open(filepath, newline="") as f:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^
-FileNotFoundError: [Errno 2] No such file or directory: '/app/azurefunctions_2019_day1.txt'
+-------------------------------------------Starting TARDIS-------------------------------------------
 -----------------------------------------
 EXPERIMENT DONE!!!

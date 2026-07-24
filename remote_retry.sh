@@ -3,5 +3,5 @@
 #chmod +x remote_setup.sh
 #./remote_setup.sh user@host
 DEST=$1
-scp -r updated_cloudlab_setup/ "$DEST:~/"
+#scp -r updated_cloudlab_setup/ "$DEST:~/"
 ssh -f $DEST "cd ~/updated_cloudlab_setup && nohup python experiment.py > script.log 2>&1 < /dev/null &"

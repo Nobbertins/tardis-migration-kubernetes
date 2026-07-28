@@ -63,7 +63,7 @@ DRY_RUN        = os.environ.get("DRY_RUN", "false").lower() == "true"
 def kubectl(*args) -> str:
     cmd = ["kubectl", *args]
     print(f"  $ {' '.join(cmd)}")
-    if DRY_RUN and any(a in ("taint", "patch", "delete", "scale", "pause", "resume") for a in args):
+    if DRY_RUN and any(a in ("taint", "patch", "delete", "scale", "pause", "resume", "label") for a in args):
         print("  [dry-run skipped]")
         return ""
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -119,7 +119,6 @@ def get_pod_spec(pod: str) -> dict | None:
         return None
     return json.loads(out)
 
-
 # ── stable identity helpers (see module docstring) ────────────────────────────
 
 def base_name_of(pod_data: dict) -> str:
@@ -165,6 +164,27 @@ def delete_old_pod(pod: str, pod_data: dict):
 
 
 # ── migration pod lifecycle ───────────────────────────────────────────────────
+
+def redirect_traffic_from_old_pod(old_pod: str):
+    """
+    Flip Service traffic onto the new migration pod by relabeling the OLD
+    pod out of selection — not by patching the Service. Both the Service
+    selector and the new pod key off `app`, and that label is copied
+    verbatim onto migration pods (see module docstring), so the new pod
+    already matches the Service as soon as it's Ready. Removing `app`
+    from the old pod is what excludes it going forward.
+
+    Also flips role -> "draining" so get_worker_pods() (selector
+    role=worker) stops offering this pod up as a migration candidate
+    while it finishes in-flight work.
+
+    MUST be called only after the new pod is confirmed healthy, and
+    before drain_worker() — draining still talks to the old pod directly
+    by IP, so removing its labels doesn't affect that.
+    """
+    print(f"  Redirecting service traffic away from {old_pod} (dropping app label)")
+    kubectl("label", "pod", "-n", NAMESPACE, old_pod,
+            "app-", "role=draining", "--overwrite")
 
 def create_migration_pod(old_pod_data: dict, dst_node: str, new_pod_name: str) -> bool:
     """
@@ -297,6 +317,8 @@ def run_migration(pod: str, dst_node: str, pre_drain_hook=None, post_delete_hook
             print("  Migration pod never became healthy — cleaning up")
             kubectl("delete", "pod", "-n", NAMESPACE, new_pod_name, "--grace-period=0")
             return False
+
+    redirect_traffic_from_old_pod(pod) 
 
     if pre_drain_hook:
         pre_drain_hook(pod, new_pod_name, old_pod_data)

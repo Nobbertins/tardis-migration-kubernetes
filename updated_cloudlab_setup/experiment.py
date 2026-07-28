@@ -4,7 +4,7 @@ import time
 
 REPEATS = 1
 MINUTES = 63
-SINGLE_RUN_TIME = 60 * MINUTES + 30 #30 sec extra so it doesn't end early for whatever reason
+SINGLE_RUN_TIME = 60 * MINUTES + 300 #30 sec extra so it doesn't end early for whatever reason
 
 def kubectl(*args) -> str:
     cmd = ["kubectl", *args]

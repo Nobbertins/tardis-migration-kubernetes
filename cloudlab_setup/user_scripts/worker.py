@@ -80,7 +80,9 @@ async def handle_drain(request):
 
 async def handle_health(request):
     if draining:
-        return web.Response(status=503, text="draining")
+        resp = web.Response(status=503, text="draining")
+        resp.force_close()
+        return resp
     return web.Response(text="ok")
 
 

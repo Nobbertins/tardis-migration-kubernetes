@@ -165,6 +165,7 @@ async def dispatch(session, app_id, duration_ms, send_time, results):
                     print(f"[{app_id}] 503 ({body}), will retry")
                     continue
 
+                
                 worker_response      = (await resp.text()).split(',')
                 worker_start         = float(worker_response[0])
                 worker_finish        = float(worker_response[1])
@@ -234,6 +235,7 @@ async def run(invocations):
             resolver=aiohttp.AsyncResolver(),
             ttl_dns_cache=5,
             use_dns_cache=True,
+            keepalive_timeout=2,
         )
     ) as session:
         tasks = []

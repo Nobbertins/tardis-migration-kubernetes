@@ -43,9 +43,15 @@ http_session: ClientSession | None = None
 # ── Kubernetes helpers ────────────────────────────────────────────────────────
 
 async def resolve_prom_url(retries: int = 20, delay: float = 5.0) -> str:
+    """
+    Look up the pod IP of the Prometheus pod via the Kubernetes API,
+    then wait until Prometheus is actually reachable before returning.
+    Retries up to `retries` times with `delay` seconds between attempts.
+    """
     kube_url = f"{KUBE_API}/api/v1/namespaces/{PROM_NAMESPACE}/pods/{PROM_POD_NAME}"
 
     for attempt in range(1, retries + 1):
+        # ── 1. resolve pod IP ──────────────────────────────────────────────
         try:
             async with http_session.get(
                 kube_url,
@@ -67,6 +73,7 @@ async def resolve_prom_url(retries: int = 20, delay: float = 5.0) -> str:
 
         prom_url = f"http://{pod_ip}:{PROM_PORT}"
 
+        # ── 2. wait until Prometheus answers ──────────────────────────────
         try:
             async with http_session.get(
                 f"{prom_url}/-/ready",
@@ -106,7 +113,13 @@ async def prom_query(query: str) -> list[dict]:
 
 
 async def detect_num_cores() -> int:
-    results = await prom_query(f'machine_cpu_cores{{node="{NODE_NAME}"}}')
+    """
+    Ask Prometheus for the core count of this node via machine_cpu_cores.
+    Falls back to psutil if the metric is unavailable.
+    """
+    results = await prom_query(
+        f'machine_cpu_cores{{node="{NODE_NAME}"}}'
+    )
     if results:
         try:
             cores = int(float(results[0]["value"][1]))
@@ -115,6 +128,7 @@ async def detect_num_cores() -> int:
         except (KeyError, ValueError, IndexError):
             pass
 
+    # Broad fallback: first result regardless of node label
     results = await prom_query("machine_cpu_cores")
     if results:
         try:
@@ -133,36 +147,39 @@ async def scrape_pod_cpu() -> dict[str, float]:
     """
     Returns per-pod CPU as a percentage of total node capacity:
         (irate cores) / NUM_CORES * 100
-    Keys are pod names.
+    Keys are "namespace/pod".
     """
     results = await prom_query(POD_CPU_QUERY)
     out: dict[str, float] = {}
     for item in results:
         m = item["metric"]
+        ns  = m.get("namespace", "unknown")
         pod = m.get("pod", "unknown")
         try:
             cores = float(item["value"][1])
         except (KeyError, ValueError, IndexError):
             continue
         pct = round(cores / NUM_CORES * 100, 2)
-        out[pod] = pct
+        out[f"{pod}"] = pct
     return out
 
 
 # ── collection loop ───────────────────────────────────────────────────────────
 
 async def collect_loop():
+    psutil.cpu_percent()          # discard the first meaningless reading
     await asyncio.sleep(SCRAPE_INTERVAL)
 
     while True:
-        ts          = time.time()
+        ts        = time.time()
+        cpu_total = psutil.cpu_percent()
+
         pod_cpu_pct = await scrape_pod_cpu()
-        cpu_total   = round(sum(pod_cpu_pct.values()), 2)
 
         samples.append({
             "timestamp": ts,
             "node":      NODE_NAME,
-            "cpu_pct":   cpu_total,
+            "cpu_pct":   round(cpu_total, 2),
             "pods":      pod_cpu_pct,
         })
         if len(samples) > MAX_SAMPLES:
@@ -180,31 +197,18 @@ async def handle_metrics(request):
     data = samples
     if since:
         try:
-            since_f = float(since)
+            data = [s for s in samples if s["timestamp"] >= float(since)]
         except ValueError:
             raise web.HTTPBadRequest(text="'since' must be a unix timestamp")
-        data = [s for s in samples if s["timestamp"] >= since_f]
 
     if fmt == "csv":
-        # Building the full CSV synchronously here blocks the event loop for
-        # the duration of the join — with tens of thousands of samples that
-        # can be long enough to miss the /health liveness probe (or spike
-        # memory past the pod's limit) and get the container killed mid
-        # response, which surfaces to scrapers as IncompleteRead. Offload
-        # the CPU-bound formatting to a thread so /health stays responsive.
-        loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, _build_csv, data)
-        return web.Response(text=text, content_type="text/csv")
+        lines = ["timestamp,node,cpu_pct,pods"]
+        for s in data:
+            pods_json = json.dumps(s.get("pods", {}))
+            lines.append(f"{s['timestamp']},{s['node']},{s['cpu_pct']},\"{pods_json}\"")
+        return web.Response(text="\n".join(lines), content_type="text/csv")
 
     return web.json_response(data)
-
-
-def _build_csv(data):
-    lines = ["timestamp,node,cpu_pct,pods"]
-    for s in data:
-        pods_json = json.dumps(s.get("pods", {}))
-        lines.append(f"{s['timestamp']},{s['node']},{s['cpu_pct']},\"{pods_json}\"")
-    return "\n".join(lines)
 
 
 async def handle_latest(request):

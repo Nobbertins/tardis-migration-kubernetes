@@ -1,189 +1,208 @@
 import asyncio
 import json
 import os
-import ssl
 import time
 import csv
-from aiohttp import web, ClientSession, ClientTimeout
-import psutil
+import io
+from aiohttp import web
 
-PORT            = int(os.environ.get("PORT", "9100"))
-SCRAPE_INTERVAL = float(os.environ.get("SCRAPE_INTERVAL", "1.0"))
-RESULTS_FILE    = os.environ.get("RESULTS_FILE", "/results/metrics.csv")
-NODE_NAME       = os.environ.get("NODE_NAME", "unknown")
-MAX_SAMPLES     = int(os.environ.get("MAX_SAMPLES", "86400"))
+from kubernetes_asyncio import client, config
+from kubernetes_asyncio.client.exceptions import ApiException
 
-PROM_POD_NAME   = "prometheus-prometheus-kube-prometheus-prometheus-0"
-PROM_NAMESPACE  = "monitoring"
-PROM_PORT       = 9090
-KUBE_API        = "https://kubernetes.default.svc"
-TOKEN_FILE      = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-CA_FILE         = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+PORT             = int(os.environ.get("PORT", "9100"))
+SCRAPE_INTERVAL  = float(os.environ.get("SCRAPE_INTERVAL", "1.0"))
+RESULTS_FILE     = os.environ.get("RESULTS_FILE", "/results/metrics.csv")
+MAX_SAMPLES      = int(os.environ.get("MAX_SAMPLES", "86400"))
 
-with open(TOKEN_FILE) as f:
-    KUBE_TOKEN = f.read().strip()
-
-KUBE_SSL = ssl.create_default_context(cafile=CA_FILE)
-
-POD_CPU_QUERY = f"""
-sum by (namespace, pod) (
-  irate(container_cpu_usage_seconds_total{{container!="POD", node="{NODE_NAME}"}}[1m])
-)
-"""
+# metrics-server itself only refreshes every 15-60s internally, and node/pod
+# scheduling doesn't change every second, so these caches are refreshed on
+# their own slower schedules rather than on every scrape.
+NODE_REFRESH_INTERVAL = float(os.environ.get("NODE_REFRESH_INTERVAL", "60.0"))
+POD_REFRESH_INTERVAL  = float(os.environ.get("POD_REFRESH_INTERVAL", "30.0"))
 
 # Populated at startup
-NUM_CORES: int = 1
-PROM_URL:  str = ""
+core_v1:    "client.CoreV1Api | None"        = None
+custom_api: "client.CustomObjectsApi | None" = None
+api_client: "client.ApiClient | None"        = None
+
+# node name -> allocatable cores
+node_cores: dict[str, float] = {}
+node_cores_last_refresh: float = 0.0
+
+# (namespace, pod) -> node name
+pod_node_map: dict[tuple[str, str], str] = {}
+pod_node_map_last_refresh: float = 0.0
 
 samples: list[dict] = []
-collector_task  = None
-http_session: ClientSession | None = None
+collector_task = None
+
+
+# ── quantity parsing ──────────────────────────────────────────────────────────
+
+def parse_cpu_quantity(qty: str | None) -> float:
+    """Parse a Kubernetes CPU resource.Quantity string into whole cores.
+
+    metrics-server reports usage.cpu as a Quantity, typically nanocores
+    ('123456789n') or millicores ('150m'), occasionally a bare core count.
+    Node allocatable/capacity is usually a bare integer core count.
+    """
+    if not qty:
+        return 0.0
+    qty = str(qty).strip()
+    if qty.endswith("n"):
+        return float(qty[:-1]) / 1_000_000_000
+    if qty.endswith("u"):
+        return float(qty[:-1]) / 1_000_000
+    if qty.endswith("m"):
+        return float(qty[:-1]) / 1_000
+    if qty.endswith("k"):
+        return float(qty[:-1]) * 1_000
+    return float(qty)
 
 
 # ── Kubernetes helpers ────────────────────────────────────────────────────────
 
-async def resolve_prom_url(retries: int = 20, delay: float = 5.0) -> str:
-    """
-    Look up the pod IP of the Prometheus pod via the Kubernetes API,
-    then wait until Prometheus is actually reachable before returning.
-    Retries up to `retries` times with `delay` seconds between attempts.
-    """
-    kube_url = f"{KUBE_API}/api/v1/namespaces/{PROM_NAMESPACE}/pods/{PROM_POD_NAME}"
-
+async def wait_for_apis_ready(retries: int = 20, delay: float = 5.0) -> None:
+    """Retry until the core API and the metrics-server aggregated API
+    (metrics.k8s.io) are both reachable and serving data."""
     for attempt in range(1, retries + 1):
-        # ── 1. resolve pod IP ──────────────────────────────────────────────
         try:
-            async with http_session.get(
-                kube_url,
-                headers={"Authorization": f"Bearer {KUBE_TOKEN}"},
-                ssl=KUBE_SSL,
-                timeout=ClientTimeout(total=5),
-            ) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"Kube API returned HTTP {resp.status}")
-                body   = await resp.json()
-                pod_ip = body["status"].get("podIP")
-                phase  = body["status"].get("phase", "unknown")
-                if not pod_ip:
-                    raise RuntimeError(f"Prometheus pod has no IP yet (phase={phase})")
+            await core_v1.list_node()
+            await custom_api.list_cluster_custom_object(
+                group="metrics.k8s.io", version="v1beta1", plural="pods"
+            )
+            print("[startup] core API and metrics.k8s.io are ready")
+            return
+        except ApiException as e:
+            print(f"[startup] attempt {attempt}/{retries}: API not ready yet: "
+                  f"HTTP {e.status} {e.reason}")
         except Exception as e:
-            print(f"[startup] attempt {attempt}/{retries}: pod lookup failed: {e}")
-            await asyncio.sleep(delay)
-            continue
+            print(f"[startup] attempt {attempt}/{retries}: API not ready yet: {e}")
+        await asyncio.sleep(delay)
 
-        prom_url = f"http://{pod_ip}:{PROM_PORT}"
-
-        # ── 2. wait until Prometheus answers ──────────────────────────────
-        try:
-            async with http_session.get(
-                f"{prom_url}/-/ready",
-                ssl=False,
-                timeout=ClientTimeout(total=5),
-            ) as resp:
-                if resp.status == 200:
-                    print(f"[startup] Prometheus ready at {prom_url}")
-                    return prom_url
-                raise RuntimeError(f"/-/ready returned HTTP {resp.status}")
-        except Exception as e:
-            print(f"[startup] attempt {attempt}/{retries}: Prometheus not ready at {prom_url}: {e}")
-            await asyncio.sleep(delay)
-
-    raise RuntimeError(f"Prometheus did not become ready after {retries} attempts")
-
-
-# ── Prometheus scraping ───────────────────────────────────────────────────────
-
-async def prom_query(query: str) -> list[dict]:
-    """Run an instant query against Prometheus and return the result list."""
-    try:
-        async with http_session.get(
-            f"{PROM_URL}/api/v1/query",
-            params={"query": query},
-            ssl=False,
-            timeout=ClientTimeout(total=10),
-        ) as resp:
-            if resp.status != 200:
-                print(f"[prom] HTTP {resp.status}")
-                return []
-            body = await resp.json()
-            return body.get("data", {}).get("result", [])
-    except Exception as e:
-        print(f"[prom] query failed: {e}")
-        return []
-
-
-async def detect_num_cores() -> int:
-    """
-    Ask Prometheus for the core count of this node via machine_cpu_cores.
-    Falls back to psutil if the metric is unavailable.
-    """
-    results = await prom_query(
-        f'machine_cpu_cores{{node="{NODE_NAME}"}}'
+    raise RuntimeError(
+        f"core API / metrics.k8s.io did not become ready after {retries} attempts "
+        f"(is the metrics-server deployment installed and healthy?)"
     )
-    if results:
-        try:
-            cores = int(float(results[0]["value"][1]))
-            print(f"[startup] Prometheus reports {cores} core(s) for node {NODE_NAME!r}")
-            return max(cores, 1)
-        except (KeyError, ValueError, IndexError):
-            pass
-
-    # Broad fallback: first result regardless of node label
-    results = await prom_query("machine_cpu_cores")
-    if results:
-        try:
-            cores = int(float(results[0]["value"][1]))
-            print(f"[startup] Prometheus (unlabelled) reports {cores} core(s)")
-            return max(cores, 1)
-        except (KeyError, ValueError, IndexError):
-            pass
-
-    cores = psutil.cpu_count(logical=True) or 1
-    print(f"[startup] Falling back to psutil: {cores} core(s)")
-    return cores
 
 
-async def scrape_pod_cpu() -> dict[str, float]:
+async def refresh_node_cores(force: bool = False) -> None:
+    """Refresh the node -> allocatable-cores map used as the denominator for
+    every pod's cpu_pct on that node."""
+    global node_cores, node_cores_last_refresh
+
+    now = time.time()
+    if not force and (now - node_cores_last_refresh) < NODE_REFRESH_INTERVAL:
+        return
+
+    try:
+        node_list = await core_v1.list_node()
+    except ApiException as e:
+        print(f"[nodes] list_node failed: HTTP {e.status} {e.reason}")
+        return
+    except Exception as e:
+        print(f"[nodes] list_node failed: {e}")
+        return
+
+    new_cores: dict[str, float] = {}
+    for n in node_list.items:
+        cpu_qty = (n.status.allocatable or {}).get("cpu") \
+            or (n.status.capacity or {}).get("cpu")
+        if cpu_qty:
+            new_cores[n.metadata.name] = max(parse_cpu_quantity(cpu_qty), 0.001)
+
+    if new_cores:
+        node_cores = new_cores
+        node_cores_last_refresh = now
+
+
+async def refresh_pod_node_map(force: bool = False) -> None:
+    """Refresh the (namespace, pod) -> node mapping for the whole cluster."""
+    global pod_node_map, pod_node_map_last_refresh
+
+    now = time.time()
+    if not force and (now - pod_node_map_last_refresh) < POD_REFRESH_INTERVAL:
+        return
+
+    try:
+        pod_list = await core_v1.list_pod_for_all_namespaces()
+    except ApiException as e:
+        print(f"[pods] list_pod_for_all_namespaces failed: HTTP {e.status} {e.reason}")
+        return
+    except Exception as e:
+        print(f"[pods] list_pod_for_all_namespaces failed: {e}")
+        return
+
+    pod_node_map = {
+        (p.metadata.namespace, p.metadata.name): p.spec.node_name
+        for p in pod_list.items
+        if p.spec.node_name  # skip unscheduled pods
+    }
+    pod_node_map_last_refresh = now
+
+
+async def scrape_cluster_cpu() -> dict[str, dict[str, float]]:
     """
-    Returns per-pod CPU as a percentage of total node capacity:
-        (irate cores) / NUM_CORES * 100
-    Keys are "namespace/pod".
+    Returns per-node, per-pod CPU as a percentage of that node's capacity:
+        { node_name: { pod_name: pct, ... }, ... }
     """
-    results = await prom_query(POD_CPU_QUERY)
-    out: dict[str, float] = {}
-    for item in results:
-        m = item["metric"]
-        ns  = m.get("namespace", "unknown")
-        pod = m.get("pod", "unknown")
-        try:
-            cores = float(item["value"][1])
-        except (KeyError, ValueError, IndexError):
-            continue
-        pct = round(cores / NUM_CORES * 100, 2)
-        out[f"{pod}"] = pct
+    await refresh_node_cores()
+    await refresh_pod_node_map()
+
+    try:
+        metrics = await custom_api.list_cluster_custom_object(
+            group="metrics.k8s.io", version="v1beta1", plural="pods"
+        )
+    except ApiException as e:
+        print(f"[metrics] list pod metrics failed: HTTP {e.status} {e.reason}")
+        return {}
+    except Exception as e:
+        print(f"[metrics] list pod metrics failed: {e}")
+        return {}
+
+    out: dict[str, dict[str, float]] = {node: {} for node in node_cores}
+
+    for item in metrics.get("items", []):
+        meta = item.get("metadata", {})
+        namespace = meta.get("namespace")
+        pod = meta.get("name", "unknown")
+
+        node = pod_node_map.get((namespace, pod))
+        if node is None or node not in node_cores:
+            continue  # pod not currently mapped to a known node
+
+        cores = 0.0
+        for container in item.get("containers", []):
+            if container.get("name") == "POD":
+                continue
+            cores += parse_cpu_quantity(container.get("usage", {}).get("cpu"))
+
+        out[node][pod] = round(cores / node_cores[node] * 100, 2)
+
     return out
 
 
 # ── collection loop ───────────────────────────────────────────────────────────
 
 async def collect_loop():
-    psutil.cpu_percent()          # discard the first meaningless reading
     await asyncio.sleep(SCRAPE_INTERVAL)
 
     while True:
-        ts        = time.time()
-        cpu_total = psutil.cpu_percent()
+        ts             = time.time()
+        pods_by_node   = await scrape_cluster_cpu()
 
-        pod_cpu_pct = await scrape_pod_cpu()
+        # One sample record per node per tick, same shape as before, just all
+        # produced from a single central poll instead of one pod per node.
+        for node, pods_pct in pods_by_node.items():
+            samples.append({
+                "timestamp": ts,
+                "node":      node,
+                "cpu_pct":   round(sum(pods_pct.values()), 2),
+                "pods":      pods_pct,
+            })
 
-        samples.append({
-            "timestamp": ts,
-            "node":      NODE_NAME,
-            "cpu_pct":   round(cpu_total, 2),
-            "pods":      pod_cpu_pct,
-        })
         if len(samples) > MAX_SAMPLES:
-            samples.pop(0)
+            del samples[: len(samples) - MAX_SAMPLES]
 
         await asyncio.sleep(SCRAPE_INTERVAL)
 
@@ -192,29 +211,68 @@ async def collect_loop():
 
 async def handle_metrics(request):
     since = request.rel_url.query.get("since")
+    node  = request.rel_url.query.get("node")
     fmt   = request.rel_url.query.get("fmt", "json")
 
     data = samples
     if since:
         try:
-            data = [s for s in samples if s["timestamp"] >= float(since)]
+            since_f = float(since)
         except ValueError:
             raise web.HTTPBadRequest(text="'since' must be a unix timestamp")
+        data = [s for s in data if s["timestamp"] >= since_f]
+    if node:
+        data = [s for s in data if s["node"] == node]
 
     if fmt == "csv":
-        lines = ["timestamp,node,cpu_pct,pods"]
-        for s in data:
-            pods_json = json.dumps(s.get("pods", {}))
-            lines.append(f"{s['timestamp']},{s['node']},{s['cpu_pct']},\"{pods_json}\"")
-        return web.Response(text="\n".join(lines), content_type="text/csv")
+        # Building the full CSV synchronously here blocks the event loop for
+        # the duration of the join — with tens of thousands of samples that
+        # can be long enough to miss the /health liveness probe (or spike
+        # memory past the pod's limit) and get the container killed mid
+        # response, which surfaces to scrapers as IncompleteRead. Offload
+        # the CPU-bound formatting to a thread so /health stays responsive.
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(None, _build_csv, data)
+        return web.Response(text=text, content_type="text/csv")
 
     return web.json_response(data)
 
 
+def _build_csv(data):
+    # Hand-rolled string formatting here doesn't escape quotes inside the
+    # JSON pods column, which corrupts every row once a pod name/value makes
+    # the JSON contain a '"' — the csv module handles quoting/escaping
+    # correctly per RFC 4180, so use it instead of building lines by hand.
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["timestamp", "node", "cpu_pct", "pods"])
+    for s in data:
+        writer.writerow([
+            s["timestamp"],
+            s["node"],
+            s["cpu_pct"],
+            json.dumps(s.get("pods", {})),
+        ])
+    return buf.getvalue()
+
+
 async def handle_latest(request):
+    node = request.rel_url.query.get("node")
     if not samples:
         raise web.HTTPServiceUnavailable(text="No samples collected yet")
-    return web.json_response(samples[-1])
+
+    if node:
+        matches = [s for s in reversed(samples) if s["node"] == node]
+        if not matches:
+            raise web.HTTPNotFound(text=f"No samples for node {node!r}")
+        return web.json_response(matches[0])
+
+    # No node specified: return the latest sample for every node currently
+    # known, keyed by node name.
+    latest_by_node: dict[str, dict] = {}
+    for s in reversed(samples):
+        latest_by_node.setdefault(s["node"], s)
+    return web.json_response(latest_by_node)
 
 
 async def handle_flush(request):
@@ -250,11 +308,19 @@ async def handle_health(request):
 # ── startup / shutdown ────────────────────────────────────────────────────────
 
 async def on_startup(app):
-    global collector_task, http_session, NUM_CORES, PROM_URL
-    http_session = ClientSession()
-    PROM_URL     = await resolve_prom_url()
-    NUM_CORES    = await detect_num_cores()
-    print(f"Node={NODE_NAME}  cores={NUM_CORES}  interval={SCRAPE_INTERVAL}s  prom={PROM_URL}")
+    global collector_task, api_client, core_v1, custom_api
+
+    config.load_incluster_config()
+    api_client = client.ApiClient()
+    core_v1    = client.CoreV1Api(api_client)
+    custom_api = client.CustomObjectsApi(api_client)
+
+    await wait_for_apis_ready()
+    await refresh_node_cores(force=True)
+    await refresh_pod_node_map(force=True)
+
+    print(f"cores_by_node={node_cores}  interval={SCRAPE_INTERVAL}s  "
+          f"source=metrics.k8s.io  pods_mapped={len(pod_node_map)}")
     collector_task = asyncio.create_task(collect_loop())
 
 
@@ -265,8 +331,8 @@ async def on_shutdown(app):
             await collector_task
         except asyncio.CancelledError:
             pass
-    if http_session:
-        await http_session.close()
+    if api_client:
+        await api_client.close()
 
 
 def main():

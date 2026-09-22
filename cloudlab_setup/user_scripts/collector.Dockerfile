@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir aiohttp psutil
+RUN pip install --no-cache-dir aiohttp psutil kubernetes_asyncio
 
 COPY collector_prom.py .
 

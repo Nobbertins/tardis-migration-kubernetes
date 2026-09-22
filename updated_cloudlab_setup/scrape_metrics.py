@@ -3,8 +3,9 @@
 scrape_metrics.py
 ─────────────────
 After your experiment, run this from anywhere that has kubectl access.
-It discovers every node-metrics-collector pod, pulls their /metrics endpoint,
-and merges everything into a single CSV.
+It discovers every node-metrics-collector pod, pulls their /metrics,
+/metrics/memory, and /metrics/io endpoints, merges the three per pod by
+timestamp, and writes everything into a single CSV across all pods.
 
 Usage:
     python scrape_metrics.py [--since <unix_ts>] [--out merged_metrics.csv]
@@ -20,8 +21,16 @@ import sys
 import urllib.request
 
 NAMESPACE   = "default"
-LABEL       = "app=node-metrics-collector"
+LABEL       = "app=cluster-metrics-collector"
 LOCAL_PORT  = 19100   # local port for kubectl port-forward
+
+# Columns in the final merged CSV, in order.
+MERGED_FIELDNAMES = [
+    "timestamp", "node",
+    "cpu_pct", "cpu_pods",
+    "mem_pct", "mem_pods",
+    "io_read_bytes_per_sec", "io_write_bytes_per_sec", "io_pods",
+]
 
 
 def get_pod_names() -> list[str]:
@@ -51,6 +60,43 @@ def fetch(url: str) -> str:
         return r.read().decode()
 
 
+def fetch_csv_rows(base: str, path: str, since: float | None) -> list[dict]:
+    url = f"{base}{path}?fmt=csv"
+    if since:
+        url += f"&since={since}"
+    raw = fetch(url)
+    return list(csv.DictReader(io.StringIO(raw)))
+
+
+def merge_metric_rows(cpu_rows: list[dict], mem_rows: list[dict], io_rows: list[dict]) -> list[dict]:
+    """
+    Each of /metrics, /metrics/memory, /metrics/io comes from the same
+    underlying per-tick sample, so a given timestamp appears identically
+    (same float, same string form) across all three. Join on that.
+    """
+    mem_by_ts = {r["timestamp"]: r for r in mem_rows}
+    io_by_ts  = {r["timestamp"]: r for r in io_rows}
+
+    merged = []
+    for cpu_row in cpu_rows:
+        ts      = cpu_row["timestamp"]
+        mem_row = mem_by_ts.get(ts, {})
+        io_row  = io_by_ts.get(ts, {})
+
+        merged.append({
+            "timestamp":               ts,
+            "node":                    cpu_row.get("node", ""),
+            "cpu_pct":                 cpu_row.get("cpu_pct", ""),
+            "cpu_pods":                cpu_row.get("pods", ""),
+            "mem_pct":                 mem_row.get("mem_pct", ""),
+            "mem_pods":                mem_row.get("pods", ""),
+            "io_read_bytes_per_sec":   io_row.get("io_read_bytes_per_sec", ""),
+            "io_write_bytes_per_sec":  io_row.get("io_write_bytes_per_sec", ""),
+            "io_pods":                 io_row.get("pods", ""),
+        })
+    return merged
+
+
 def scrape_pod(pod: str, since: float | None, until: float | None, do_flush: bool, local_port: int) -> list[dict]:
     pf = port_forward(pod, local_port)
     rows = []
@@ -62,13 +108,11 @@ def scrape_pod(pod: str, since: float | None, until: float | None, do_flush: boo
             with urllib.request.urlopen(req, timeout=10) as r:
                 print(f"  flush: {r.read().decode().strip()}")
 
-        url = f"{base}/metrics?fmt=csv"
-        if since:
-            url += f"&since={since}"
+        cpu_rows = fetch_csv_rows(base, "/metrics", since)
+        mem_rows = fetch_csv_rows(base, "/metrics/memory", since)
+        io_rows  = fetch_csv_rows(base, "/metrics/io", since)
 
-        raw = fetch(url)
-        reader = csv.DictReader(io.StringIO(raw))
-        rows = list(reader)
+        rows = merge_metric_rows(cpu_rows, mem_rows, io_rows)
 
         if until:
             rows = [r for r in rows if float(r["timestamp"]) <= until]
@@ -133,7 +177,7 @@ def main():
         return
 
     with open(args.out, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=all_rows[0].keys())
+        writer = csv.DictWriter(f, fieldnames=MERGED_FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(all_rows)
 

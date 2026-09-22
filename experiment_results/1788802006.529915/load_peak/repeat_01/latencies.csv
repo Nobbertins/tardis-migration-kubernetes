@@ -1,0 +1,14 @@
+
+── Tail Latency Report (overhead = latency - duration) ──
+  Total invocations : 3310
+  Retried           : 0
+  p50  : 8.4ms
+  p60  : 8.6ms
+  p70  : 9.0ms
+  p80  : 19.9ms
+  p90  : 100.0ms
+  p95  : 138.2ms
+  p99  : 205.1ms
+  p995 : 233.7ms
+  p999 : 271.0ms
+  max  : 337.9ms
